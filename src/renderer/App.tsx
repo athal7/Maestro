@@ -153,9 +153,9 @@ import { useLayerStack } from './contexts/LayerStackContext';
 import { notifyToast } from './stores/notificationStore';
 import { useModalActions, useModalStore } from './stores/modalStore';
 import { GitStatusProvider } from './contexts/GitStatusContext';
-import { WindowProvider } from './contexts/WindowContext';
+import { WindowProvider, useWindowContextOptional } from './contexts/WindowContext';
 import { InputProvider, useInputContext } from './contexts/InputContext';
-import { useGroupChatStore } from './stores/groupChatStore';
+import { useGroupChatStore, isGroupChatVisibleInWindow } from './stores/groupChatStore';
 import { useBatchStore } from './stores/batchStore';
 // All session state is read directly from useSessionStore in MaestroConsoleInner.
 import {
@@ -669,6 +669,13 @@ function MaestroConsoleInner() {
 	const moderatorUsage = useGroupChatStore((s) => s.moderatorUsage);
 	const participantStates = useGroupChatStore((s) => s.participantStates);
 	const groupChatError = useGroupChatStore((s) => s.groupChatError);
+	const groupChatInitiatorWindowId = useGroupChatStore((s) => s.initiatorWindowId);
+
+	// Multi-window: which window initiated the active group chat. The panel renders
+	// only there (gated below via isGroupChatVisibleInWindow). Optional context, so
+	// the single-window app / web / isolation tests fall back to "show here".
+	const windowCtx = useWindowContextOptional();
+	const currentWindowId = windowCtx?.windowId ?? null;
 
 	// Stable actions from groupChatStore (non-reactive)
 	const {
@@ -677,7 +684,26 @@ function MaestroConsoleInner() {
 		setGroupChatReadOnlyMode,
 		setGroupChatRightTab,
 		setGroupChatParticipantColors,
+		setInitiatorWindowId,
 	} = useGroupChatStore.getState();
+
+	// Multi-window: stamp the initiating window on this window's group-chat store
+	// when a chat opens, and clear it on close. Because each window has its own
+	// store, the only window that sets activeGroupChatId is the one the user
+	// opened the chat in, so initiatorWindowId records that window. The render
+	// gate below then shows the panel only there, even though every window holds
+	// the same groupChats list and a participant agent may live in another window.
+	useEffect(() => {
+		if (!activeGroupChatId) {
+			if (groupChatInitiatorWindowId !== null) setInitiatorWindowId(null);
+			return;
+		}
+		// Wait for window identity to hydrate (null windowId on the primary window
+		// pre-hydrate); the gate treats a null initiatorWindowId as "show here".
+		if (currentWindowId && groupChatInitiatorWindowId === null) {
+			setInitiatorWindowId(currentWindowId);
+		}
+	}, [activeGroupChatId, currentWindowId, groupChatInitiatorWindowId, setInitiatorWindowId]);
 
 	// --- APP INITIALIZATION (extracted hook, Phase 2G) ---
 	const {
@@ -3406,8 +3432,10 @@ function MaestroConsoleInner() {
 				)}
 
 				{/* --- GROUP CHAT VIEW (shown when a group chat is active, hidden when log viewer open) --- */}
+				{/* Multi-window: render only in the window that initiated the chat. */}
 				{!logViewerOpen &&
 					activeGroupChatId &&
+					isGroupChatVisibleInWindow(groupChatInitiatorWindowId, currentWindowId) &&
 					groupChats.find((c) => c.id === activeGroupChatId) && (
 						<>
 							<div
