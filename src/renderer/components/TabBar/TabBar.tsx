@@ -12,7 +12,7 @@ import { NewTabPopover } from './NewTabPopover';
 import { SearchPopover } from './SearchPopover';
 import { isUnifiedTabActive, getShortcutHint } from './tabBarUtils';
 import { buildFileTabDisplayNames } from '../../hooks/tabs/internal/filePreviewTabHelpers';
-import { useWindowContextOptional } from '../../contexts/WindowContext';
+import { useWindowOwnsSession } from '../../contexts/WindowContext';
 import type { TabBarProps } from './types';
 import { logger } from '../../utils/logger';
 
@@ -115,10 +115,8 @@ function TabBarInner({
 	// owns. The primary window is the catch-all owner; a secondary window owns
 	// only its scoped agents, so it shows an empty tab area for any agent it
 	// doesn't own. Outside a WindowProvider (isolation tests) or without a
-	// sessionId, fall back to rendering normally - single-window behaviour is
-	// unchanged.
-	const windowCtx = useWindowContextOptional();
-	const ownsActiveAgent = !windowCtx || !sessionId || windowCtx.ownsSession(sessionId);
+	// sessionId, this resolves to true - single-window behaviour is unchanged.
+	const ownsActiveAgent = useWindowOwnsSession(sessionId);
 
 	// Scroll active tab into view
 	useEffect(() => {

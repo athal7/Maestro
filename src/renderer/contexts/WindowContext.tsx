@@ -308,3 +308,21 @@ export function useWindowContext(): WindowContextValue {
 export function useWindowContextOptional(): WindowContextValue | null {
 	return useContext(WindowContext);
 }
+
+/**
+ * Whether THIS window should surface (render) the given agent. A thin, null-safe
+ * convenience over {@link WindowContextValue.ownsSession} for the common case of
+ * gating an agent-scoped view on ownership:
+ *   - Outside a {@link WindowProvider} (single-window app / isolation tests) it
+ *     returns `true`, so callers keep today's unscoped behaviour.
+ *   - When `sessionId` is null/undefined it returns `true` - there is no agent to
+ *     gate, so the caller's own "no active agent" branch handles that case.
+ *
+ * The main tab bar, {@link MainPanel}, and {@link RightPanel} use this to fall
+ * back to a clean empty state for an agent this window no longer owns (e.g. after
+ * the agent moved to another window) instead of showing a stale view.
+ */
+export function useWindowOwnsSession(sessionId: string | null | undefined): boolean {
+	const ctx = useWindowContextOptional();
+	return !ctx || !sessionId || ctx.ownsSession(sessionId);
+}

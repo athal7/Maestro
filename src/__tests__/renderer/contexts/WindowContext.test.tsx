@@ -14,6 +14,7 @@ import {
 	WindowProvider,
 	useWindowContext,
 	useWindowContextOptional,
+	useWindowOwnsSession,
 } from '../../../renderer/contexts/WindowContext';
 import type { WindowInfo, WindowState } from '../../../shared/window-types';
 
@@ -492,6 +493,51 @@ describe('WindowContext', () => {
 
 			await waitFor(() => expect(result.current?.windowId).toBe('win-1'));
 			expect(typeof result.current?.ownsSession).toBe('function');
+		});
+	});
+
+	describe('useWindowOwnsSession', () => {
+		it('returns true outside a provider so single-window views stay unscoped', () => {
+			const { result } = renderHook(() => useWindowOwnsSession('any-agent'));
+			expect(result.current).toBe(true);
+		});
+
+		it('returns true for a null/undefined sessionId (nothing to gate)', () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(makeState({ id: 'win-2' }));
+
+			const { result } = renderHook(() => useWindowOwnsSession(null), { wrapper });
+			expect(result.current).toBe(true);
+		});
+
+		it('primary window owns an unclaimed agent but not one claimed elsewhere', async () => {
+			setUrl('/');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'primary-1', sessionIds: [], activeSessionId: null })
+			);
+			vi.mocked(windows().list).mockResolvedValue([
+				makeInfo({ id: 'primary-1', isMain: true }),
+				makeInfo({ id: 'win-2', sessionIds: ['claimed'], activeSessionId: 'claimed' }),
+			]);
+
+			const { result: free } = renderHook(() => useWindowOwnsSession('free-agent'), { wrapper });
+			expect(free.current).toBe(true);
+
+			const { result: claimed } = renderHook(() => useWindowOwnsSession('claimed'), { wrapper });
+			await waitFor(() => expect(claimed.current).toBe(false));
+		});
+
+		it('secondary window owns only its scoped agents', async () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a'], activeSessionId: 'a' })
+			);
+
+			const { result: owned } = renderHook(() => useWindowOwnsSession('a'), { wrapper });
+			await waitFor(() => expect(owned.current).toBe(true));
+
+			const { result: other } = renderHook(() => useWindowOwnsSession('b'), { wrapper });
+			expect(other.current).toBe(false);
 		});
 	});
 });

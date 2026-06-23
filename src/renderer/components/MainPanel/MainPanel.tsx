@@ -33,7 +33,29 @@ import { useChatFileDropZone } from '../../hooks/ui/useChatFileDropZone';
 import { MainPanelHeader } from './MainPanelHeader';
 import { MainPanelContent } from './MainPanelContent';
 import { AgentErrorBanner } from './AgentErrorBanner';
+import { useWindowOwnsSession } from '../../contexts/WindowContext';
+import type { Theme } from '../../types';
 import type { MainPanelHandle, MainPanelProps } from './types';
+
+/**
+ * Empty placeholder shown when this window has no agent to display - either no
+ * agent is active, or the active agent now lives in another window (multi-window
+ * scoping). Kept module-scope so both the "no active session" and "active agent
+ * owned elsewhere" branches render the identical clean state.
+ */
+function EmptyMainPanel({ theme }: { theme: Theme }) {
+	return (
+		<div
+			className="flex-1 flex flex-col items-center justify-center min-w-0 relative opacity-30"
+			style={{ backgroundColor: theme.colors.bgMain }}
+		>
+			<Wand2 className="w-16 h-16 mb-4" style={{ color: theme.colors.textDim }} />
+			<p className="text-sm" style={{ color: theme.colors.textDim }}>
+				No agents. Create one to get started.
+			</p>
+		</div>
+	);
+}
 
 // PERFORMANCE: Wrap with React.memo to prevent re-renders when parent (App.tsx) re-renders
 // due to input value changes. The component will only re-render when its props actually change.
@@ -702,6 +724,16 @@ export const MainPanel = React.memo(
 		// don't mount this zone.
 		const chatDropZone = useChatFileDropZone(theme, handleDrop);
 
+		// Multi-window scoping: this window only renders an agent it owns. If the
+		// store's active agent lives in (or has moved to) another window, fall back
+		// to the clean empty state instead of showing a stale view (or that agent's
+		// own session/memory overlays). Outside a WindowProvider (single-window /
+		// isolation tests) this is always true, so behaviour is unchanged.
+		const ownsActiveSession = useWindowOwnsSession(activeSession?.id);
+		if (activeSession && !ownsActiveSession) {
+			return <EmptyMainPanel theme={theme} />;
+		}
+
 		// Show log viewer
 		if (logViewerOpen) {
 			return (
@@ -760,17 +792,7 @@ export const MainPanel = React.memo(
 
 		// Show empty state when no active session
 		if (!activeSession) {
-			return (
-				<div
-					className="flex-1 flex flex-col items-center justify-center min-w-0 relative opacity-30"
-					style={{ backgroundColor: theme.colors.bgMain }}
-				>
-					<Wand2 className="w-16 h-16 mb-4" style={{ color: theme.colors.textDim }} />
-					<p className="text-sm" style={{ color: theme.colors.textDim }}>
-						No agents. Create one to get started.
-					</p>
-				</div>
-			);
+			return <EmptyMainPanel theme={theme} />;
 		}
 
 		// File preview eligibility checked inline below
