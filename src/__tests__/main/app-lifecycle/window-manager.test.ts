@@ -1688,6 +1688,48 @@ describe('app-lifecycle/window-manager', () => {
 			expect(lastBrowserWindowOptions?.y).toBe(90);
 		});
 
+		it('restores a secondary window onto its still-connected secondary display', async () => {
+			// End-to-end "remember which display": a window saved on a still-present
+			// second monitor must spawn back on that monitor (coords kept), not be
+			// yanked to the primary. Two side-by-side 1920x1080 displays.
+			mockScreen.state.displays = [
+				{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } },
+				{ workArea: { x: 1920, y: 0, width: 1920, height: 1080 } },
+			];
+			const registry = makeRegistry();
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			windowManager.createSecondaryWindow(['agent-1'], {
+				x: 2000,
+				y: 100,
+				width: 800,
+				height: 600,
+			});
+
+			expect(lastBrowserWindowOptions?.x).toBe(2000);
+			expect(lastBrowserWindowOptions?.y).toBe(100);
+		});
+
+		it('falls back the primary window to the primary display when its saved monitor is gone', async () => {
+			// The primary restore path (createWindow with saved bounds, used by
+			// restoreWindows) must honor the same off-screen guard: a monitor that has
+			// since been unplugged repositions the window onto the primary display.
+			const registry = makeRegistry();
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			// Only the primary display exists (beforeEach reset); these bounds name a
+			// now-removed monitor to the right.
+			windowManager.createWindow({ bounds: { x: 2000, y: 100, width: 800, height: 600 } });
+
+			// Centered on the primary 1920x1080 work area for an 800x600 window.
+			expect(lastBrowserWindowOptions?.x).toBe(560);
+			expect(lastBrowserWindowOptions?.y).toBe(240);
+		});
+
 		it('allows reloading a secondary window to its own windowId URL, blocks others', async () => {
 			const registry = makeRegistry();
 			const windowManager = await makeManager({
@@ -1876,6 +1918,24 @@ describe('app-lifecycle/window-manager', () => {
 
 			expect(resolveVisibleWindowPosition({ x: 2000, y: 100, width: 800, height: 600 })).toEqual({
 				x: 2000,
+				y: 100,
+			});
+		});
+
+		it('keeps coordinates on a monitor positioned to the left of primary (negative origin)', async () => {
+			// A monitor placed to the LEFT of the primary has a negative origin, so a
+			// window living on it is saved with negative x. This is the common
+			// real-world layout the positive-x case above does not exercise.
+			mockScreen.state.displays = [
+				{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } },
+				{ workArea: { x: -1920, y: 0, width: 1920, height: 1080 } },
+			];
+
+			const { resolveVisibleWindowPosition } =
+				await import('../../../main/app-lifecycle/window-manager');
+
+			expect(resolveVisibleWindowPosition({ x: -1800, y: 100, width: 800, height: 600 })).toEqual({
+				x: -1800,
 				y: 100,
 			});
 		});
