@@ -16,6 +16,18 @@ import { mockTheme } from '../../helpers/mockTheme';
 
 type SetDragImage = (image: Element, x: number, y: number) => void;
 
+/**
+ * jsdom re-serializes a `border` shorthand's color from hex to its `rgb(...)`
+ * form, so the inline style read back is `1px solid rgb(189, 147, 249)`, never
+ * the original `#bd93f9`. Convert so the assertion can accept either form.
+ */
+function hexToRgb(hex: string): string {
+	const pairs = hex.replace('#', '').match(/.{2}/g);
+	if (!pairs) return hex;
+	const [r, g, b] = pairs.map((h) => parseInt(h, 16));
+	return `rgb(${r}, ${g}, ${b})`;
+}
+
 /** A minimal React.DragEvent whose dataTransfer exposes (or omits) setDragImage. */
 function makeDragEvent(setDragImage?: SetDragImage): DragEvent {
 	return {
@@ -41,7 +53,11 @@ describe('setTabDragImage', () => {
 		const node = setDragImage.mock.calls[0][0] as HTMLElement;
 		expect(node.textContent).toBe('Agent Tab');
 		// Styled from theme tokens for visual consistency with the live tab bar.
-		expect(node.style.border).toContain(mockTheme.colors.accent);
+		// jsdom normalizes the hex accent to its rgb() form, so accept either.
+		const accent = mockTheme.colors.accent;
+		expect(node.style.border.includes(accent) || node.style.border.includes(hexToRgb(accent))).toBe(
+			true
+		);
 		// Mounted off-screen so the OS can snapshot it before it is removed.
 		expect(document.body.contains(node)).toBe(true);
 
