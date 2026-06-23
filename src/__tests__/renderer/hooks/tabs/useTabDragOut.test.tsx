@@ -5,7 +5,9 @@
  * the cursor leaves them. The behaviours that matter: in-bar reordering is
  * untouched (this hook only flips a boolean), the exit state engages only once
  * the cursor crosses the window edge, the bounds query is async (so early
- * samples are treated as "inside"), and everything resets on drag end.
+ * samples are treated as "inside"), and everything resets on drag end. Once the
+ * cursor is outside, each sample also resolves which other Maestro window sits
+ * under it (via findWindowAtPoint), coalesced to one in-flight IPC at a time.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -14,6 +16,7 @@ import { useTabDragOut } from '../../../../renderer/hooks/tabs/useTabDragOut';
 import type { WindowBounds } from '../../../../shared/window-types';
 
 const getBounds = () => vi.mocked(window.maestro.windows.getBounds);
+const findWindowAtPoint = () => vi.mocked(window.maestro.windows.findWindowAtPoint);
 
 const WINDOW_BOUNDS: WindowBounds = { x: 100, y: 100, width: 800, height: 600 };
 
@@ -32,12 +35,17 @@ describe('useTabDragOut', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		getBounds().mockResolvedValue(null);
+		// clearAllMocks wipes call history but not implementations, so reset the
+		// per-test findWindowAtPoint resolution to "empty space" to avoid leakage.
+		findWindowAtPoint().mockReset();
+		findWindowAtPoint().mockResolvedValue(null);
 	});
 
-	it('starts idle with no exit state or tracked point', () => {
+	it('starts idle with no exit state, tracked point, or dock target', () => {
 		const { result } = renderHook(() => useTabDragOut());
 		expect(result.current.isDraggingOut).toBe(false);
 		expect(result.current.getDragOutPoint()).toBeNull();
+		expect(result.current.getTargetWindowId()).toBeNull();
 	});
 
 	it('snapshots window bounds on beginDragOut', async () => {
@@ -105,13 +113,16 @@ describe('useTabDragOut', () => {
 	it('resets all tracking on endDragOut', async () => {
 		const { result } = renderHook(() => useTabDragOut());
 		await armWithBounds(result);
+		findWindowAtPoint().mockResolvedValue('window-2');
 
-		act(() => result.current.trackDragOut(50, 200)); // outside
+		await act(async () => result.current.trackDragOut(50, 200)); // outside
 		expect(result.current.isDraggingOut).toBe(true);
+		expect(result.current.getTargetWindowId()).toBe('window-2');
 
 		act(() => result.current.endDragOut());
 		expect(result.current.isDraggingOut).toBe(false);
 		expect(result.current.getDragOutPoint()).toBeNull();
+		expect(result.current.getTargetWindowId()).toBeNull();
 	});
 
 	it('degrades to never-detecting when the windows API is unavailable', () => {
@@ -129,5 +140,94 @@ describe('useTabDragOut', () => {
 		} finally {
 			window.maestro.windows.getBounds = original;
 		}
+	});
+
+	describe('dock-target resolution', () => {
+		it('does not look up a window while the cursor stays inside the bounds', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+
+			act(() => result.current.trackDragOut(200, 200)); // inside
+			expect(findWindowAtPoint()).not.toHaveBeenCalled();
+			expect(result.current.getTargetWindowId()).toBeNull();
+		});
+
+		it('resolves the Maestro window under the cursor once it leaves the bounds', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+			findWindowAtPoint().mockResolvedValue('window-2');
+
+			await act(async () => result.current.trackDragOut(50, 200)); // left of x=100
+			expect(findWindowAtPoint()).toHaveBeenCalledWith(50, 200);
+			expect(result.current.getTargetWindowId()).toBe('window-2');
+		});
+
+		it('reports no dock target over empty space', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+			findWindowAtPoint().mockResolvedValue(null); // no window under the cursor
+
+			await act(async () => result.current.trackDragOut(50, 200)); // outside
+			expect(findWindowAtPoint()).toHaveBeenCalledWith(50, 200);
+			expect(result.current.getTargetWindowId()).toBeNull();
+		});
+
+		it('clears the dock target when the cursor returns inside the window', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+			findWindowAtPoint().mockResolvedValue('window-2');
+
+			await act(async () => result.current.trackDragOut(50, 200)); // outside
+			expect(result.current.getTargetWindowId()).toBe('window-2');
+
+			act(() => result.current.trackDragOut(200, 200)); // back inside
+			expect(result.current.getTargetWindowId()).toBeNull();
+		});
+
+		it('coalesces overlapping lookups and replays the latest point on settle', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+
+			// First lookup hangs; later calls resolve immediately to a new window.
+			let resolveFirst!: (id: string | null) => void;
+			findWindowAtPoint().mockReturnValueOnce(
+				new Promise<string | null>((resolve) => {
+					resolveFirst = resolve;
+				})
+			);
+			findWindowAtPoint().mockResolvedValue('window-3');
+
+			// First exit sample -> one IPC in flight for point A.
+			act(() => result.current.trackDragOut(50, 200));
+			expect(findWindowAtPoint()).toHaveBeenCalledTimes(1);
+			expect(findWindowAtPoint()).toHaveBeenLastCalledWith(50, 200);
+
+			// Second sample arrives mid-flight -> parked, no extra IPC yet.
+			act(() => result.current.trackDragOut(40, 250));
+			expect(findWindowAtPoint()).toHaveBeenCalledTimes(1);
+
+			// First settles -> the parked point B replays as the next IPC.
+			await act(async () => {
+				resolveFirst('window-2');
+			});
+			await act(async () => {}); // drain the replayed lookup's microtasks
+			expect(findWindowAtPoint()).toHaveBeenCalledTimes(2);
+			expect(findWindowAtPoint()).toHaveBeenLastCalledWith(40, 250);
+			expect(result.current.getTargetWindowId()).toBe('window-3');
+		});
+
+		it('does not throw or resolve a target when findWindowAtPoint is unavailable', async () => {
+			const { result } = renderHook(() => useTabDragOut());
+			await armWithBounds(result);
+			const original = window.maestro.windows.findWindowAtPoint;
+			(window.maestro.windows as { findWindowAtPoint?: unknown }).findWindowAtPoint = undefined;
+			try {
+				act(() => result.current.trackDragOut(50, 200)); // outside, but no IPC available
+				expect(result.current.isDraggingOut).toBe(true);
+				expect(result.current.getTargetWindowId()).toBeNull();
+			} finally {
+				window.maestro.windows.findWindowAtPoint = original;
+			}
+		});
 	});
 });

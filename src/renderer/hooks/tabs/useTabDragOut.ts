@@ -39,6 +39,15 @@ export interface UseTabDragOutReturn {
 	 * target / new-window position.
 	 */
 	getDragOutPoint: () => DragOutPoint | null;
+	/**
+	 * The ID of another Maestro window currently under the drag cursor, or `null`
+	 * when the cursor is over empty space (or still inside the owning window).
+	 * Resolved via `windows.findWindowAtPoint()` while {@link UseTabDragOutReturn.isDraggingOut}
+	 * is true and read on drop to choose dock-into-window vs. spawn-new-window.
+	 * The owning window is never reported - resolution only runs once the cursor
+	 * is outside its bounds, which the point can no longer be inside.
+	 */
+	getTargetWindowId: () => string | null;
 	/** Clear all drag-out tracking. Call from the tab's `onDragEnd` / `onDrop`. */
 	endDragOut: () => void;
 }
@@ -57,6 +66,13 @@ export interface UseTabDragOutReturn {
  * IPC round-trip per drag keeps the move path cheap. The latest cursor point is
  * kept in a ref so feeding samples never forces a re-render; only the boolean
  * exit state is React state, and it is set only when it actually changes.
+ *
+ * While the cursor is outside the owning window, each sample also resolves which
+ * other Maestro window (if any) sits under it via `windows.findWindowAtPoint()`.
+ * That lookup is async, so it is coalesced to a single in-flight IPC: the newest
+ * point arriving mid-flight is stashed and fired when the previous one settles,
+ * trailing-throttling a fast drag to the round-trip rate instead of flooding the
+ * main process. The resolved target is held in a ref for the drop handler to read.
  */
 export function useTabDragOut(): UseTabDragOutReturn {
 	const [isDraggingOut, setIsDraggingOut] = useState(false);
@@ -65,10 +81,55 @@ export function useTabDragOut(): UseTabDragOutReturn {
 	// re-render and it must be live for the very next trackDragOut call.
 	const boundsRef = useRef<WindowBounds | null>(null);
 	const pointRef = useRef<DragOutPoint | null>(null);
+	// The other Maestro window under the cursor while dragging out, or null over
+	// empty space / inside the owning window. Ref, not state: read synchronously
+	// on drop, and the cross-window highlight (a later task) drives off broadcasts.
+	const targetWindowIdRef = useRef<string | null>(null);
+	// True while a findWindowAtPoint IPC is outstanding; the latest point that
+	// arrived during that window is parked here and replayed once it resolves.
+	const lookupInFlightRef = useRef(false);
+	const pendingLookupRef = useRef<DragOutPoint | null>(null);
+
+	const resetLookup = useCallback(() => {
+		targetWindowIdRef.current = null;
+		lookupInFlightRef.current = false;
+		pendingLookupRef.current = null;
+	}, []);
+
+	// Named function expression so the trailing replay can self-reference without
+	// a ref dance or an exhaustive-deps cycle.
+	const resolveTargetWindow = useCallback(function resolveTargetWindow(point: DragOutPoint): void {
+		// findWindowAtPoint is absent outside the Electron preload (web build / unit
+		// tests); degrade to "no dock target" rather than throwing mid-drag.
+		const findWindowAtPoint = window.maestro?.windows?.findWindowAtPoint;
+		if (!findWindowAtPoint) return;
+		// Only one lookup in flight: park the newest point and replay it on settle.
+		if (lookupInFlightRef.current) {
+			pendingLookupRef.current = point;
+			return;
+		}
+		lookupInFlightRef.current = true;
+		void findWindowAtPoint(point.x, point.y)
+			.then((windowId) => {
+				targetWindowIdRef.current = windowId;
+			})
+			.catch((error) => {
+				logger.warn('[useTabDragOut] failed to resolve target window', error);
+				targetWindowIdRef.current = null;
+			})
+			.finally(() => {
+				lookupInFlightRef.current = false;
+				const pending = pendingLookupRef.current;
+				pendingLookupRef.current = null;
+				// A newer sample arrived mid-flight - resolve it now the IPC is free.
+				if (pending) resolveTargetWindow(pending);
+			});
+	}, []);
 
 	const beginDragOut = useCallback(() => {
 		boundsRef.current = null;
 		pointRef.current = null;
+		resetLookup();
 		setIsDraggingOut(false);
 		// getBounds is absent outside the Electron preload (web build / unit tests);
 		// degrade to "never detects an exit" rather than throwing mid-drag.
@@ -81,26 +142,48 @@ export function useTabDragOut(): UseTabDragOutReturn {
 			.catch((error) => {
 				logger.warn('[useTabDragOut] failed to read window bounds', error);
 			});
-	}, []);
+	}, [resetLookup]);
 
-	const trackDragOut = useCallback((screenX: number, screenY: number) => {
-		// The drag's final event can report (0,0); ignore that degenerate sample so
-		// it does not spuriously flip the exit state at the end of a drag.
-		if (screenX === 0 && screenY === 0) return;
-		pointRef.current = { x: screenX, y: screenY };
-		const bounds = boundsRef.current;
-		// No bounds yet (query still in flight) -> treat as inside the window.
-		const outside = bounds ? isPointOutsideWindowBounds(pointRef.current, bounds) : false;
-		setIsDraggingOut((prev) => (prev === outside ? prev : outside));
-	}, []);
+	const trackDragOut = useCallback(
+		(screenX: number, screenY: number) => {
+			// The drag's final event can report (0,0); ignore that degenerate sample so
+			// it does not spuriously flip the exit state at the end of a drag.
+			if (screenX === 0 && screenY === 0) return;
+			const point = { x: screenX, y: screenY };
+			pointRef.current = point;
+			const bounds = boundsRef.current;
+			// No bounds yet (query still in flight) -> treat as inside the window.
+			const outside = bounds ? isPointOutsideWindowBounds(point, bounds) : false;
+			if (outside) {
+				// Cursor has left the owning window: find the Maestro window under it so
+				// a drop can dock there, else fall back to spawning a new window.
+				resolveTargetWindow(point);
+			} else {
+				// Inside the owning window (or bounds unresolved): no dock target.
+				targetWindowIdRef.current = null;
+			}
+			setIsDraggingOut((prev) => (prev === outside ? prev : outside));
+		},
+		[resolveTargetWindow]
+	);
 
 	const getDragOutPoint = useCallback(() => pointRef.current, []);
+
+	const getTargetWindowId = useCallback(() => targetWindowIdRef.current, []);
 
 	const endDragOut = useCallback(() => {
 		boundsRef.current = null;
 		pointRef.current = null;
+		resetLookup();
 		setIsDraggingOut(false);
-	}, []);
+	}, [resetLookup]);
 
-	return { isDraggingOut, beginDragOut, trackDragOut, getDragOutPoint, endDragOut };
+	return {
+		isDraggingOut,
+		beginDragOut,
+		trackDragOut,
+		getDragOutPoint,
+		getTargetWindowId,
+		endDragOut,
+	};
 }
