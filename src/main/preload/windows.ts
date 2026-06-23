@@ -75,6 +75,16 @@ export function createWindowsApi() {
 		getState: (): Promise<WindowState | null> => ipcRenderer.invoke('windows:getState'),
 
 		/**
+		 * Claim a freshly-created agent for the CALLING window so it surfaces here
+		 * immediately and is never momentarily shown by the primary window's
+		 * catch-all (spawn flicker). Called at agent-creation time, before the
+		 * agent's process starts emitting output.
+		 * @param sessionId - The newly-created agent's ID
+		 */
+		registerSession: (sessionId: string): Promise<{ registered: boolean }> =>
+			ipcRenderer.invoke('windows:registerSession', sessionId),
+
+		/**
 		 * Persist the calling window's panel-collapse UI state. Per-window (keyed to
 		 * the calling window in the main process), not a global setting, so each
 		 * window remembers its own collapsed side panels. Only the provided fields

@@ -121,6 +121,7 @@ describe('Windows IPC Handlers', () => {
 				'windows:moveSession',
 				'windows:focusWindow',
 				'windows:getState',
+				'windows:registerSession',
 				'windows:setPanelState',
 				'windows:getBounds',
 				'windows:findWindowAtPoint',
@@ -365,6 +366,55 @@ describe('Windows IPC Handlers', () => {
 			};
 			expect(after.leftPanelCollapsed).toBe(true);
 			expect(after.rightPanelCollapsed).toBe(true);
+		});
+	});
+
+	describe('windows:registerSession', () => {
+		it('claims a new agent for the calling window resolved from event.sender', async () => {
+			const win = makeFakeWindow();
+			const id = registry.create({ browserWindow: win, sessionIds: [], isMain: false });
+
+			const result = (await handlers.get('windows:registerSession')!(
+				makeEvent(win),
+				'agent-new'
+			)) as { registered: boolean };
+
+			expect(result.registered).toBe(true);
+			expect(registry.get(id)?.sessionIds).toEqual(['agent-new']);
+			expect(registry.getWindowForSession('agent-new')).toBe(id);
+		});
+
+		it('strips the agent from any other window (single ownership)', async () => {
+			// The agent was somehow owned elsewhere (e.g. a stale claim); registering
+			// it into the calling window must leave it owned by exactly that window.
+			const primary = makeFakeWindow();
+			const secondary = makeFakeWindow();
+			const primaryId = registry.create({
+				browserWindow: primary,
+				sessionIds: ['agent-x'],
+				isMain: true,
+			});
+			const secondaryId = registry.create({
+				browserWindow: secondary,
+				sessionIds: [],
+				isMain: false,
+			});
+
+			await handlers.get('windows:registerSession')!(makeEvent(secondary), 'agent-x');
+
+			expect(registry.get(primaryId)?.sessionIds).toEqual([]);
+			expect(registry.get(secondaryId)?.sessionIds).toEqual(['agent-x']);
+			expect(registry.getWindowForSession('agent-x')).toBe(secondaryId);
+		});
+
+		it('is a no-op (registered=false) when the calling window is not registered', async () => {
+			const result = (await handlers.get('windows:registerSession')!(
+				makeEvent(makeFakeWindow()),
+				'agent-new'
+			)) as { registered: boolean };
+
+			expect(result.registered).toBe(false);
+			expect(registry.getWindowForSession('agent-new')).toBeNull();
 		});
 	});
 

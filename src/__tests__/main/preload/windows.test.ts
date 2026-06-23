@@ -103,6 +103,15 @@ describe('Windows Preload API', () => {
 		expect(mockInvoke).toHaveBeenCalledWith('windows:getState');
 	});
 
+	it('registerSession forwards the session id', async () => {
+		mockInvoke.mockResolvedValue({ registered: true });
+
+		const result = await api.registerSession('agent-new');
+
+		expect(mockInvoke).toHaveBeenCalledWith('windows:registerSession', 'agent-new');
+		expect(result).toEqual({ registered: true });
+	});
+
 	it('setPanelState forwards the panel state', async () => {
 		mockInvoke.mockResolvedValue(undefined);
 

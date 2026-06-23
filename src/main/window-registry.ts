@@ -196,10 +196,7 @@ export class WindowRegistry extends EventEmitter {
 		if (!from || !to) return;
 		// Single-ownership invariant: drop the session from every window first, so a
 		// stale fromWindowId can never leave it owned by two windows.
-		for (const entry of this.windows.values()) {
-			const idx = entry.sessionIds.indexOf(sessionId);
-			if (idx !== -1) entry.sessionIds.splice(idx, 1);
-		}
+		this.stripSessionFromAllWindows(sessionId);
 		to.sessionIds.push(sessionId);
 		this.emitChange({
 			type: 'session-moved',
@@ -207,6 +204,45 @@ export class WindowRegistry extends EventEmitter {
 			fromWindowId,
 			toWindowId,
 		});
+	}
+
+	/**
+	 * Remove `sessionId` from every window's owned set. The single-ownership
+	 * helper behind both {@link applyMove} and {@link registerSession}: stripping
+	 * everywhere before re-assigning guarantees an agent can never end up owned by
+	 * two windows, no matter how stale the caller's view of current ownership is.
+	 */
+	private stripSessionFromAllWindows(sessionId: string): void {
+		for (const entry of this.windows.values()) {
+			const idx = entry.sessionIds.indexOf(sessionId);
+			if (idx !== -1) entry.sessionIds.splice(idx, 1);
+		}
+	}
+
+	/**
+	 * Claim a freshly-created agent for `windowId`, recording that window as its
+	 * sole owner. Used at spawn time so an agent created from a specific window is
+	 * owned by it BEFORE its process starts emitting output - otherwise the
+	 * primary window's catch-all would momentarily surface it (spawn flicker).
+	 *
+	 * Enforces the single-ownership invariant (the session is stripped from every
+	 * other window first), so a duplicate registration can never leave the agent
+	 * owned twice. No-op - and emits nothing - when the window is unknown or it is
+	 * already the session's sole owner. Otherwise emits `sessions-changed` so
+	 * persistence and the other windows' renderers pick up the new ownership.
+	 */
+	registerSession(windowId: string, sessionId: string): void {
+		const target = this.windows.get(windowId);
+		if (!target) return;
+		const ownedElsewhere = this.getAll().some(
+			(entry) => entry.id !== windowId && entry.sessionIds.includes(sessionId)
+		);
+		// Already the sole owner: nothing to change, so stay silent (no redundant
+		// broadcast/persist churn on a re-register of an agent this window owns).
+		if (!ownedElsewhere && target.sessionIds.includes(sessionId)) return;
+		this.stripSessionFromAllWindows(sessionId);
+		target.sessionIds.push(sessionId);
+		this.emitChange({ type: 'sessions-changed', windowId });
 	}
 
 	/**

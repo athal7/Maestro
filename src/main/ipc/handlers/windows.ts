@@ -269,6 +269,23 @@ export function registerWindowsHandlers(deps: WindowsHandlerDependencies): void 
 		return entry ? registeredWindowToWindowState(entry) : null;
 	});
 
+	// Claim a freshly-created agent for the CALLING window, making it that window's
+	// owner before the agent's process starts emitting output (spawn-flicker fix).
+	// Resolved from event.sender so a window only ever claims an agent into itself;
+	// an unregistered caller is a silent no-op. The registry emits sessions-changed,
+	// which wireWindowRegistryBroadcast forwards to every window so the primary's
+	// catch-all and the cross-window badges drop the now-owned agent.
+	ipcMain.handle(
+		'windows:registerSession',
+		(event: Electron.IpcMainInvokeEvent, sessionId: string): { registered: boolean } => {
+			const registry = requireDependency(getWindowRegistry, 'Window registry');
+			const entry = resolveCallingWindow(event, registry);
+			if (!entry) return { registered: false };
+			registry.registerSession(entry.id, sessionId);
+			return { registered: true };
+		}
+	);
+
 	// Persist the calling window's panel-collapse UI state (per-window, not a
 	// global setting). Resolved from event.sender so a window only ever writes its
 	// own state; an unregistered caller is a silent no-op. A later read via

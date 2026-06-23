@@ -338,6 +338,64 @@ describe('WindowContext', () => {
 		});
 	});
 
+	describe('registerNewSession - spawn-flicker claim', () => {
+		it('scopes a new agent into a secondary window AND records registry ownership', async () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a'], activeSessionId: 'a' })
+			);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.sessionIds).toEqual(['a']));
+
+			await act(async () => {
+				await result.current.registerNewSession('fresh');
+			});
+
+			// The agent surfaces in this window immediately (local scope) and becomes active...
+			expect(result.current.sessionIds).toEqual(['a', 'fresh']);
+			expect(result.current.activeSessionId).toBe('fresh');
+			// ...and the registry is told this window owns it, so the primary's catch-all
+			// never flashes the agent and the layout persists it here.
+			expect(windows().registerSession).toHaveBeenCalledWith('fresh');
+		});
+
+		it('focuses a new agent in the primary window without a registry write (catch-all owner)', async () => {
+			setUrl('/');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'primary-1', sessionIds: [], activeSessionId: null })
+			);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.windowId).toBe('primary-1'));
+
+			await act(async () => {
+				await result.current.registerNewSession('fresh');
+			});
+
+			expect(result.current.activeSessionId).toBe('fresh');
+			// The primary already surfaces any unclaimed agent, so no claim is recorded.
+			expect(windows().registerSession).not.toHaveBeenCalled();
+		});
+
+		it('does not duplicate an agent already scoped to this window', async () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a'], activeSessionId: 'a' })
+			);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.sessionIds).toEqual(['a']));
+
+			await act(async () => {
+				await result.current.registerNewSession('a');
+			});
+
+			expect(result.current.sessionIds).toEqual(['a']);
+			expect(result.current.activeSessionId).toBe('a');
+		});
+	});
+
 	describe('moveSessionToNewWindow', () => {
 		it('creates a new window, transfers ownership, and drops the agent locally', async () => {
 			setUrl('/?windowId=win-1');

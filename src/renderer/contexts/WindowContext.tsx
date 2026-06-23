@@ -100,6 +100,16 @@ export interface WindowContextValue {
 	 * window, focuses that window instead of stealing it (single-window-per-agent).
 	 */
 	openSession: (sessionId: string) => Promise<void>;
+	/**
+	 * Claim a just-created agent for THIS window so its tab strip surfaces here on
+	 * the very next render and it is never momentarily shown by the primary
+	 * window's catch-all (spawn flicker). Call this when an agent is created from
+	 * this window's UI, before its process starts emitting output. The primary
+	 * window already surfaces any unclaimed agent, so it only focuses locally; a
+	 * secondary window additionally records ownership in the registry so the
+	 * primary excludes the agent and the layout persists to it.
+	 */
+	registerNewSession: (sessionId: string) => Promise<void>;
 	/** Remove an agent's tab strip from this window (does not delete the agent). */
 	closeTab: (sessionId: string) => void;
 	/**
@@ -318,6 +328,28 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 		setScope((prev) => removeFromScope(prev, sessionId));
 	}, []);
 
+	const registerNewSession = useCallback(
+		async (sessionId: string) => {
+			// Surface the agent in THIS window immediately. The scope update is
+			// synchronous, so the creating window's tab strip shows the agent on the
+			// next render with no async gap (the source of spawn flicker).
+			setScope((prev) => ({
+				sessionIds: prev.sessionIds.includes(sessionId)
+					? prev.sessionIds
+					: [...prev.sessionIds, sessionId],
+				activeSessionId: sessionId,
+			}));
+			// The primary window is the catch-all owner: it already surfaces any
+			// unclaimed agent, so no registry write is needed (and none of the saved
+			// primary sessionIds drive its ownership). A secondary window must record
+			// the claim so the primary's catch-all excludes the agent and the layout
+			// persists the agent to this window.
+			if (isMainWindow) return;
+			await window.maestro.windows.registerSession(sessionId);
+		},
+		[isMainWindow]
+	);
+
 	/**
 	 * Guard against emptying the primary window. The primary is the catch-all
 	 * owner, so it must always surface at least one agent; moving the last agent
@@ -393,6 +425,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			ownsSession,
 			getSessionWindow,
 			openSession,
+			registerNewSession,
 			closeTab,
 			moveSessionToNewWindow,
 			moveSessionToWindow,
@@ -407,6 +440,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			ownsSession,
 			getSessionWindow,
 			openSession,
+			registerNewSession,
 			closeTab,
 			moveSessionToNewWindow,
 			moveSessionToWindow,

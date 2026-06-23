@@ -243,6 +243,63 @@ describe('WindowRegistry', () => {
 		});
 	});
 
+	describe('registerSession', () => {
+		beforeEach(() => {
+			registry.create({
+				windowId: 'main',
+				isMain: true,
+				sessionIds: ['m1'],
+				browserWindow: makeWindow(),
+			});
+			registry.create({ windowId: 'w2', sessionIds: [], browserWindow: makeWindow() });
+		});
+
+		it('claims a new agent for the given window and emits sessions-changed', () => {
+			const listener = vi.fn();
+			registry.onChange(listener);
+
+			registry.registerSession('w2', 'fresh');
+
+			expect(registry.get('w2')?.sessionIds).toEqual(['fresh']);
+			expect(registry.getWindowForSession('fresh')).toBe('w2');
+			expect(listener).toHaveBeenCalledWith(
+				expect.objectContaining({ type: 'sessions-changed', windowId: 'w2' })
+			);
+		});
+
+		it('strips the agent from every other window (single ownership)', () => {
+			// 'fresh' is somehow already owned by the primary (e.g. a stale claim).
+			registry.setSessionsForWindow('main', ['m1', 'fresh']);
+
+			registry.registerSession('w2', 'fresh');
+
+			expect(registry.get('main')?.sessionIds).toEqual(['m1']);
+			expect(registry.get('w2')?.sessionIds).toEqual(['fresh']);
+			expect(registry.getWindowForSession('fresh')).toBe('w2');
+		});
+
+		it('is a no-op (no change) when the window already solely owns the agent', () => {
+			registry.registerSession('w2', 'fresh');
+			const listener = vi.fn();
+			registry.onChange(listener);
+
+			registry.registerSession('w2', 'fresh');
+
+			expect(registry.get('w2')?.sessionIds).toEqual(['fresh']);
+			expect(listener).not.toHaveBeenCalled();
+		});
+
+		it('is a no-op for an unknown window', () => {
+			const listener = vi.fn();
+			registry.onChange(listener);
+
+			registry.registerSession('ghost', 'fresh');
+
+			expect(registry.getWindowForSession('fresh')).toBeNull();
+			expect(listener).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('reclaimSessionsToPrimary', () => {
 		it('moves every session from a secondary window into the primary', () => {
 			registry.create({
