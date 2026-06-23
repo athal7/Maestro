@@ -66,6 +66,13 @@ export interface WindowContextValue {
 	/** The agent currently focused in this window, or `null` when it owns none. */
 	activeSessionId: string | null;
 	/**
+	 * Whether THIS window should surface the given agent's tab strip. The primary
+	 * window is the catch-all owner (every agent no secondary window has claimed);
+	 * a secondary window owns exactly the agents in its scoped `sessionIds`. The
+	 * main tab bar uses this to scope which agent's tabs it renders.
+	 */
+	ownsSession: (sessionId: string) => boolean;
+	/**
 	 * Open/focus an agent in THIS window. If the agent already lives in another
 	 * window, focuses that window instead of stealing it (single-window-per-agent).
 	 */
@@ -113,23 +120,48 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 	const isMainWindow = paramWindowId === null;
 	const [windowId, setWindowId] = useState<string | null>(paramWindowId);
 	const [scope, setScope] = useState<WindowScope>({ sessionIds: [], activeSessionId: null });
+	// Agents claimed by OTHER windows. The primary window is the catch-all owner,
+	// so it needs to know which agents a secondary window has taken over to scope
+	// its tab bar correctly. Empty in the common single-window case.
+	const [sessionsOwnedElsewhere, setSessionsOwnedElsewhere] = useState<Set<string>>(
+		() => new Set()
+	);
 
 	/**
 	 * Pull this window's owned agents + active agent from the main-process
-	 * registry. Reused on mount and (later Phase 2 task) when a
-	 * `windows:sessionMoved` broadcast says ownership changed.
+	 * registry, plus the agents owned by every other window. Reused on mount and
+	 * (later Phase 2 task) when a `windows:sessionMoved` broadcast says ownership
+	 * changed.
 	 */
 	const hydrate = useCallback(async () => {
-		const state = await window.maestro.windows.getState();
+		const [state, allWindows] = await Promise.all([
+			window.maestro.windows.getState(),
+			window.maestro.windows.list(),
+		]);
 		if (!state) return;
 		// The primary window has no URL param, so adopt the registry's id for it.
 		setWindowId((prev) => prev ?? state.id);
 		setScope({ sessionIds: state.sessionIds, activeSessionId: state.activeSessionId });
+		// Build the set of agents owned by windows other than this one.
+		const elsewhere = new Set<string>();
+		for (const win of allWindows ?? []) {
+			if (win.id === state.id) continue;
+			for (const sid of win.sessionIds) elsewhere.add(sid);
+		}
+		setSessionsOwnedElsewhere(elsewhere);
 	}, []);
 
 	useEffect(() => {
 		void hydrate();
 	}, [hydrate]);
+
+	const ownsSession = useCallback(
+		(sessionId: string): boolean =>
+			// The primary window surfaces every agent that no secondary window has
+			// explicitly claimed; a secondary window owns exactly its scoped set.
+			isMainWindow ? !sessionsOwnedElsewhere.has(sessionId) : scope.sessionIds.includes(sessionId),
+		[isMainWindow, sessionsOwnedElsewhere, scope.sessionIds]
+	);
 
 	const openSession = useCallback(
 		async (sessionId: string) => {
@@ -174,6 +206,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			isMainWindow,
 			sessionIds: scope.sessionIds,
 			activeSessionId: scope.activeSessionId,
+			ownsSession,
 			openSession,
 			closeTab,
 			moveSessionToNewWindow,
@@ -183,6 +216,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			isMainWindow,
 			scope.sessionIds,
 			scope.activeSessionId,
+			ownsSession,
 			openSession,
 			closeTab,
 			moveSessionToNewWindow,
@@ -202,4 +236,14 @@ export function useWindowContext(): WindowContextValue {
 		throw new Error('useWindowContext must be used within a WindowProvider');
 	}
 	return context;
+}
+
+/**
+ * Like {@link useWindowContext} but returns `null` instead of throwing when used
+ * outside a {@link WindowProvider}. For components that mount both inside the
+ * window-aware app and standalone (e.g. in isolation tests) - they degrade to
+ * "no window scoping" rather than crashing.
+ */
+export function useWindowContextOptional(): WindowContextValue | null {
+	return useContext(WindowContext);
 }

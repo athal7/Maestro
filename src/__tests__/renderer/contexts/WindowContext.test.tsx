@@ -10,8 +10,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import React, { ReactNode } from 'react';
-import { WindowProvider, useWindowContext } from '../../../renderer/contexts/WindowContext';
-import type { WindowState } from '../../../shared/window-types';
+import {
+	WindowProvider,
+	useWindowContext,
+	useWindowContextOptional,
+} from '../../../renderer/contexts/WindowContext';
+import type { WindowInfo, WindowState } from '../../../shared/window-types';
 
 const windows = () => window.maestro.windows;
 
@@ -32,6 +36,16 @@ function makeState(partial: Partial<WindowState> & Pick<WindowState, 'id'>): Win
 	};
 }
 
+/** Build a WindowInfo for the `windows.list()` mock. */
+function makeInfo(partial: Partial<WindowInfo> & Pick<WindowInfo, 'id'>): WindowInfo {
+	return {
+		isMain: false,
+		sessionIds: [],
+		activeSessionId: null,
+		...partial,
+	};
+}
+
 /** Set the renderer URL so the provider reads the desired `?windowId=` param. */
 function setUrl(search: string): void {
 	window.history.replaceState({}, '', search || '/');
@@ -47,6 +61,7 @@ describe('WindowContext', () => {
 		setUrl('/');
 		// Reset the windows IPC mocks to their neutral baseline; tests override.
 		vi.mocked(windows().getState).mockResolvedValue(null);
+		vi.mocked(windows().list).mockResolvedValue([]);
 		vi.mocked(windows().getForSession).mockResolvedValue(null);
 		vi.mocked(windows().focusWindow).mockResolvedValue({ focused: true });
 		vi.mocked(windows().create).mockResolvedValue(null);
@@ -279,6 +294,65 @@ describe('WindowContext', () => {
 			const { closeTab } = result.current;
 			rerender();
 			expect(result.current.closeTab).toBe(closeTab);
+		});
+	});
+
+	describe('ownsSession', () => {
+		it('primary window owns every agent no other window has claimed', async () => {
+			setUrl('/');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'primary-1', sessionIds: [], activeSessionId: null })
+			);
+			vi.mocked(windows().list).mockResolvedValue([
+				makeInfo({ id: 'primary-1', isMain: true }),
+				makeInfo({ id: 'win-2', sessionIds: ['claimed'], activeSessionId: 'claimed' }),
+			]);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.windowId).toBe('primary-1'));
+
+			// The catch-all primary owns any agent no secondary window took over...
+			expect(result.current.ownsSession('free-agent')).toBe(true);
+			// ...but not one a secondary window has explicitly claimed.
+			await waitFor(() => expect(result.current.ownsSession('claimed')).toBe(false));
+		});
+
+		it('secondary window owns only its scoped agents', async () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a', 'b'], activeSessionId: 'a' })
+			);
+			vi.mocked(windows().list).mockResolvedValue([
+				makeInfo({ id: 'primary-1', isMain: true, sessionIds: ['x'], activeSessionId: 'x' }),
+				makeInfo({ id: 'win-2', sessionIds: ['a', 'b'], activeSessionId: 'a' }),
+			]);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.sessionIds).toEqual(['a', 'b']));
+
+			expect(result.current.ownsSession('a')).toBe(true);
+			expect(result.current.ownsSession('b')).toBe(true);
+			// A secondary window is NOT a catch-all: it owns neither another window's
+			// agent nor an entirely unclaimed one.
+			expect(result.current.ownsSession('x')).toBe(false);
+			expect(result.current.ownsSession('free-agent')).toBe(false);
+		});
+	});
+
+	describe('useWindowContextOptional', () => {
+		it('returns null outside a provider instead of throwing', () => {
+			const { result } = renderHook(() => useWindowContextOptional());
+			expect(result.current).toBeNull();
+		});
+
+		it('returns the live context value inside a provider', async () => {
+			setUrl('/?windowId=win-1');
+			vi.mocked(windows().getState).mockResolvedValue(makeState({ id: 'win-1' }));
+
+			const { result } = renderHook(() => useWindowContextOptional(), { wrapper });
+
+			await waitFor(() => expect(result.current?.windowId).toBe('win-1'));
+			expect(typeof result.current?.ownsSession).toBe('function');
 		});
 	});
 });

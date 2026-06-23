@@ -12,6 +12,7 @@ import { NewTabPopover } from './NewTabPopover';
 import { SearchPopover } from './SearchPopover';
 import { isUnifiedTabActive, getShortcutHint } from './tabBarUtils';
 import { buildFileTabDisplayNames } from '../../hooks/tabs/internal/filePreviewTabHelpers';
+import { useWindowContextOptional } from '../../contexts/WindowContext';
 import type { TabBarProps } from './types';
 import { logger } from '../../utils/logger';
 
@@ -110,6 +111,15 @@ function TabBarInner({
 	const activeTab = tabs.find((t) => t.id === activeTabId);
 	const activeTabName = activeTab?.name ?? null;
 
+	// Multi-window scoping: a window only renders the tab strip of an agent it
+	// owns. The primary window is the catch-all owner; a secondary window owns
+	// only its scoped agents, so it shows an empty tab area for any agent it
+	// doesn't own. Outside a WindowProvider (isolation tests) or without a
+	// sessionId, fall back to rendering normally - single-window behaviour is
+	// unchanged.
+	const windowCtx = useWindowContextOptional();
+	const ownsActiveAgent = !windowCtx || !sessionId || windowCtx.ownsSession(sessionId);
+
 	// Scroll active tab into view
 	useEffect(() => {
 		requestAnimationFrame(() => {
@@ -154,23 +164,25 @@ function TabBarInner({
 	// Filter tabs for display. Memoized so the filter only re-runs when the
 	// inputs actually change — without this, every TabBar render (e.g. on input
 	// keystrokes or unrelated session updates) re-walks the tabs array.
-	const displayedTabs = useMemo(
-		() =>
-			showUnreadOnly
-				? tabs.filter(
-						(t) =>
-							t.hasUnread ||
-							t.state === 'busy' ||
-							(inputMode === 'ai' && t.id === activeTabId) ||
-							hasDraft(t) ||
-							(showStarredInUnreadFilter && t.starred)
-					)
-				: tabs,
-		[tabs, showUnreadOnly, inputMode, activeTabId, showStarredInUnreadFilter]
-	);
+	const displayedTabs = useMemo(() => {
+		// Window doesn't own this agent: render an empty tab strip (scoped window).
+		if (!ownsActiveAgent) return [];
+		return showUnreadOnly
+			? tabs.filter(
+					(t) =>
+						t.hasUnread ||
+						t.state === 'busy' ||
+						(inputMode === 'ai' && t.id === activeTabId) ||
+						hasDraft(t) ||
+						(showStarredInUnreadFilter && t.starred)
+				)
+			: tabs;
+	}, [tabs, showUnreadOnly, inputMode, activeTabId, showStarredInUnreadFilter, ownsActiveAgent]);
 
 	const displayedUnifiedTabs = useMemo(() => {
 		if (!unifiedTabs) return null;
+		// Window doesn't own this agent: render an empty tab strip (scoped window).
+		if (!ownsActiveAgent) return [];
 		if (!showUnreadOnly) return unifiedTabs;
 		// In filter mode: AI tabs filtered by unread/busy/active/draft;
 		// file and terminal tabs always shown (they have no unread state,
@@ -203,6 +215,7 @@ function TabBarInner({
 		inputMode,
 		showStarredInUnreadFilter,
 		showFilePreviewsInUnreadFilter,
+		ownsActiveAgent,
 	]);
 
 	// Drag handlers
@@ -455,8 +468,10 @@ function TabBarInner({
 				</button>
 			</div>
 
-			{/* Empty state when filter is on but no unread tabs */}
+			{/* Empty state when filter is on but no unread tabs (only for an owned agent;
+				a scoped window with no owned agent renders a plain empty tab area) */}
 			{showUnreadOnly &&
+				ownsActiveAgent &&
 				(displayedUnifiedTabs ? displayedUnifiedTabs.length === 0 : displayedTabs.length === 0) && (
 					<div
 						className="flex items-center px-3 py-1.5 text-xs italic shrink-0 self-center mb-1"
