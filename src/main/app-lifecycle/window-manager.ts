@@ -242,8 +242,16 @@ export interface WindowManagerDependencies {
 
 /** Window manager instance */
 export interface WindowManager {
-	/** Create and show the main (primary) window. */
-	createWindow: () => BrowserWindow;
+	/**
+	 * Create and show the main (primary) window. With no options the window
+	 * restores from the legacy single-window store (backward compatible). On a
+	 * multi-window restore the caller passes the saved primary's `bounds` and the
+	 * `sessionIds` it owns so the primary comes back exactly where it was.
+	 */
+	createWindow: (options?: {
+		sessionIds?: string[];
+		bounds?: Partial<SharedWindowState>;
+	}) => BrowserWindow;
 	/**
 	 * Create a secondary window owning `sessionIds`, registered with the window
 	 * registry. The window self-identifies via a `?windowId=<id>` query appended
@@ -819,18 +827,24 @@ export function createWindowManager(deps: WindowManagerDependencies): WindowMana
 	};
 
 	return {
-		createWindow: (): BrowserWindow => {
+		createWindow: (options?: {
+			sessionIds?: string[];
+			bounds?: Partial<SharedWindowState>;
+		}): BrowserWindow => {
 			const windowId = generateUUID();
-			// Restore saved window state from the legacy single-window store.
+			const sessionIds = options?.sessionIds ?? [];
+			// Restore from the saved multi-window primary bounds when restoring a
+			// layout; otherwise fall back to the legacy single-window store.
+			const bounds = options?.bounds ?? windowStateStore.store;
 			const browserWindow = createBrowserWindow({
 				windowId,
-				sessionIds: [],
-				bounds: windowStateStore.store,
+				sessionIds,
+				bounds,
 				isMain: true,
 			});
 
 			if (windowRegistry) {
-				windowRegistry.create({ windowId, browserWindow, sessionIds: [], isMain: true });
+				windowRegistry.create({ windowId, browserWindow, sessionIds, isMain: true });
 				// Keep the registry consistent if the primary closes. On macOS the
 				// app stays alive after all windows close and a later `activate`
 				// rebuilds a fresh primary, so the stale entry must not linger.

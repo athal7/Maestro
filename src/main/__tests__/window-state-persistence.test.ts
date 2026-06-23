@@ -15,10 +15,15 @@ import type { WindowState as WindowStateStoreData } from '../stores/types';
 import { WindowRegistry } from '../window-registry';
 import {
 	buildMultiWindowState,
+	planWindowRestore,
 	registeredWindowToWindowState,
 	saveAllWindowStates,
 	saveWindowState,
 } from '../window-state-persistence';
+import type {
+	MultiWindowState,
+	WindowState as PersistedWindowState,
+} from '../../shared/window-types';
 
 // Hoisted so the mock factory can reference it: the static import of the module
 // under test is hoisted above the test body, so a plain `const` would still be
@@ -58,6 +63,24 @@ function makeWindow(
 function makeStore(): Store<WindowStateStoreData> & { set: ReturnType<typeof vi.fn> } {
 	return { set: vi.fn() } as unknown as Store<WindowStateStoreData> & {
 		set: ReturnType<typeof vi.fn>;
+	};
+}
+
+/** Build a persisted (shared) WindowState with sane defaults for restore tests. */
+function makePersistedWindow(overrides: Partial<PersistedWindowState> = {}): PersistedWindowState {
+	return {
+		id: 'w',
+		x: 0,
+		y: 0,
+		width: 1000,
+		height: 700,
+		isMaximized: false,
+		isFullScreen: false,
+		sessionIds: [],
+		activeSessionId: null,
+		leftPanelCollapsed: false,
+		rightPanelCollapsed: false,
+		...overrides,
 	};
 }
 
@@ -263,6 +286,66 @@ describe('window-state-persistence', () => {
 				expect.any(String),
 				expect.any(Error)
 			);
+		});
+	});
+
+	describe('planWindowRestore', () => {
+		it('returns no specs for undefined state (fall back to a single primary)', () => {
+			expect(planWindowRestore(undefined, new Set())).toEqual([]);
+		});
+
+		it('returns no specs when the state tracks zero windows', () => {
+			const state: MultiWindowState = { windows: [], primaryWindowId: '' };
+			expect(planWindowRestore(state, new Set())).toEqual([]);
+		});
+
+		it('plans the primary first, then secondaries in saved order, carrying bounds', () => {
+			const state: MultiWindowState = {
+				primaryWindowId: 'primary',
+				windows: [
+					makePersistedWindow({ id: 'secondary-a', x: 10, y: 20, sessionIds: ['a'] }),
+					makePersistedWindow({ id: 'primary', x: 0, y: 0, sessionIds: ['p'] }),
+					makePersistedWindow({ id: 'secondary-b', x: 30, y: 40, sessionIds: ['b'] }),
+				],
+			};
+
+			const specs = planWindowRestore(state, new Set(['a', 'b', 'p']));
+
+			expect(specs.map((s) => s.isPrimary)).toEqual([true, false, false]);
+			expect(specs.map((s) => s.bounds.id)).toEqual(['primary', 'secondary-a', 'secondary-b']);
+			expect(specs.map((s) => s.sessionIds)).toEqual([['p'], ['a'], ['b']]);
+			// Bounds ride through untouched so each window restores where it was.
+			expect(specs[1].bounds).toMatchObject({ x: 10, y: 20 });
+		});
+
+		it('drops agents that no longer exist from each window', () => {
+			const state: MultiWindowState = {
+				primaryWindowId: 'primary',
+				windows: [
+					makePersistedWindow({ id: 'primary', sessionIds: ['alive', 'deleted'] }),
+					makePersistedWindow({ id: 'secondary', sessionIds: ['gone', 'kept'] }),
+				],
+			};
+
+			const specs = planWindowRestore(state, new Set(['alive', 'kept']));
+
+			expect(specs[0].sessionIds).toEqual(['alive']);
+			expect(specs[1].sessionIds).toEqual(['kept']);
+		});
+
+		it('falls back to the first window as primary when primaryWindowId is dangling', () => {
+			const state: MultiWindowState = {
+				primaryWindowId: 'missing',
+				windows: [
+					makePersistedWindow({ id: 'first', sessionIds: ['x'] }),
+					makePersistedWindow({ id: 'second', sessionIds: ['y'] }),
+				],
+			};
+
+			const specs = planWindowRestore(state, new Set(['x', 'y']));
+
+			expect(specs[0]).toMatchObject({ isPrimary: true, bounds: { id: 'first' } });
+			expect(specs[1]).toMatchObject({ isPrimary: false, bounds: { id: 'second' } });
 		});
 	});
 });

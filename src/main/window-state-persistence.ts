@@ -128,3 +128,53 @@ export function saveWindowState(
 	if (!entry || entry.browserWindow.isDestroyed()) return;
 	saveAllWindowStates(store, registry);
 }
+
+/**
+ * One window to recreate on startup: whether it is the primary, the agents it
+ * owns (already pruned of deleted agents), and the bounds/display mode and
+ * panel-collapse state to restore it with.
+ */
+export interface WindowRestoreSpec {
+	isPrimary: boolean;
+	sessionIds: string[];
+	bounds: WindowState;
+}
+
+/**
+ * Plan the windows to recreate from a persisted {@link MultiWindowState},
+ * dropping any owned agents that no longer exist.
+ *
+ * This is the read-side inverse of {@link buildMultiWindowState}: it turns the
+ * persisted blob back into an ordered list of window-creation specs the window
+ * manager can replay. Each saved window contributes one spec carrying its
+ * surviving agents (pruned against `existingAgentIds`) and its bounds. The
+ * primary window (the one whose id matches `primaryWindowId`, or the first
+ * window when that pointer is dangling) is flagged `isPrimary` and placed first
+ * so callers create it before any secondary.
+ *
+ * Returns an empty array when there is nothing to restore - no state at all, or
+ * a state that tracks zero windows (a fresh install seeds `{ windows: [] }`).
+ * Callers treat that as "fall back to a single primary window".
+ */
+export function planWindowRestore(
+	state: MultiWindowState | undefined,
+	existingAgentIds: ReadonlySet<string>
+): WindowRestoreSpec[] {
+	if (!state || state.windows.length === 0) return [];
+
+	const primary =
+		state.windows.find((window) => window.id === state.primaryWindowId) ?? state.windows[0];
+	const pruneSessions = (sessionIds: string[]): string[] =>
+		sessionIds.filter((id) => existingAgentIds.has(id));
+
+	// Primary first so the caller can create it (and anchor `mainWindow`) before
+	// any secondary window; the remaining windows keep their saved order.
+	const specs: WindowRestoreSpec[] = [
+		{ isPrimary: true, sessionIds: pruneSessions(primary.sessionIds), bounds: primary },
+	];
+	for (const window of state.windows) {
+		if (window.id === primary.id) continue;
+		specs.push({ isPrimary: false, sessionIds: pruneSessions(window.sessionIds), bounds: window });
+	}
+	return specs;
+}

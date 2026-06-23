@@ -260,6 +260,38 @@ describe('app-lifecycle/window-manager', () => {
 			expect(lastBrowserWindowOptions?.y).toBe(50);
 		});
 
+		it('restores the primary from passed bounds + sessionIds (multi-window restore)', async () => {
+			const { createWindowManager } = await import('../../../main/app-lifecycle/window-manager');
+			const { WindowRegistry } = await import('../../../main/window-registry');
+			const registry = new WindowRegistry();
+
+			const windowManager = createWindowManager({
+				windowStateStore: mockWindowStateStore as unknown as Parameters<
+					typeof createWindowManager
+				>[0]['windowStateStore'],
+				isDevelopment: false,
+				preloadPath: '/path/to/preload.js',
+				rendererProductionUrl: 'app://app/index.html',
+				devServerUrl: 'http://localhost:5173',
+				useNativeTitleBar: false,
+				autoHideMenuBar: false,
+				windowRegistry: registry,
+			});
+
+			// The saved primary's bounds win over the legacy store (50,50), and its
+			// agents are registered so the renderer can scope its tab strips.
+			windowManager.createWindow({
+				sessionIds: ['agent-a', 'agent-b'],
+				bounds: { x: 300, y: 400, width: 1280, height: 720 },
+			});
+
+			expect(lastBrowserWindowOptions?.x).toBe(300);
+			expect(lastBrowserWindowOptions?.y).toBe(400);
+			const primary = registry.getPrimary();
+			expect(primary?.isMain).toBe(true);
+			expect(primary?.sessionIds).toEqual(['agent-a', 'agent-b']);
+		});
+
 		it('drops off-screen saved coordinates so the window spawns centered', async () => {
 			// -32000,-32000 is what Windows reports for a minimized window. If it
 			// ever lands in the store it must not be restored verbatim.

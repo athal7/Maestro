@@ -159,6 +159,10 @@ import {
 } from './app-lifecycle';
 // Multi-window registry (single source of truth for window<->session ownership)
 import { WindowRegistry } from './window-registry';
+// Multi-window startup restore: turn the persisted MultiWindowState back into
+// window-creation specs (pruning agents that no longer exist).
+import { planWindowRestore } from './window-state-persistence';
+import type { WindowState as SharedWindowState } from '../shared/window-types';
 // Phase 3 refactoring - process listeners
 import { setupProcessListeners as setupProcessListenersModule } from './process-listeners';
 import { setupWakaTimeListener } from './process-listeners/wakatime-listener';
@@ -451,8 +455,8 @@ const createWebServer = createWebServerFactory({
 // - Window state persistence (position, size, maximized/fullscreen)
 // - DevTools installation in development
 // - Auto-updater initialization in production
-function createWindow() {
-	mainWindow = windowManager.createWindow();
+function createWindow(options?: { sessionIds?: string[]; bounds?: Partial<SharedWindowState> }) {
+	mainWindow = windowManager.createWindow(options);
 	// Handle closed event to clear the reference
 	mainWindow.on('closed', () => {
 		mainWindow = null;
@@ -479,6 +483,45 @@ function createWindow() {
 	mainWindow.webContents.on('render-process-gone', () => {
 		processManager?.killAll();
 	});
+}
+
+/**
+ * Restore the saved multi-window layout on startup.
+ *
+ * Reads the persisted `MultiWindowState`, drops any owned agents that no longer
+ * exist, then recreates each saved window with its bounds and agent assignments
+ * through the window manager - the primary via {@link createWindow} (which
+ * anchors `mainWindow`) and the rest as secondary windows. Off-screen bounds are
+ * already guarded inside the window manager's `createBrowserWindow`.
+ *
+ * When there is no saved layout (a fresh install seeds an empty
+ * `MultiWindowState`, and a pre-migration store has none at all) it falls back
+ * to a single primary window using the legacy single-window bounds - identical
+ * to the previous startup behavior.
+ */
+function restoreWindows() {
+	// The set of agents that still exist, so a window never tries to restore a
+	// tab strip for an agent the user has since deleted.
+	const existingAgentIds = new Set<string>();
+	for (const session of sessionsStore.get('sessions', []) as Array<{ id?: unknown }>) {
+		if (typeof session?.id === 'string') existingAgentIds.add(session.id);
+	}
+
+	const specs = planWindowRestore(windowStateStore.get('multiWindow'), existingAgentIds);
+	if (specs.length === 0) {
+		// No saved multi-window layout - single primary window (backward compatible).
+		createWindow();
+		return;
+	}
+
+	logger.info(`Restoring ${specs.length} window(s) from saved layout`, 'Startup');
+	for (const spec of specs) {
+		if (spec.isPrimary) {
+			createWindow({ sessionIds: spec.sessionIds, bounds: spec.bounds });
+		} else {
+			windowManager.createSecondaryWindow(spec.sessionIds, spec.bounds);
+		}
+	}
 }
 
 // Set up global error handlers for uncaught exceptions (Phase 4 refactoring)
@@ -1191,9 +1234,10 @@ app
 			Menu.setApplicationMenu(null);
 		}
 
-		// Create main window
-		logger.info('Creating main window', 'Startup');
-		createWindow();
+		// Restore the saved multi-window layout (or a single primary window when
+		// there is nothing saved - backward compatible).
+		logger.info('Restoring window layout', 'Startup');
+		restoreWindows();
 
 		// Wire the global "summon Maestro" hotkey. Register the saved binding (if
 		// any) and re-register live when the setting changes from any source
