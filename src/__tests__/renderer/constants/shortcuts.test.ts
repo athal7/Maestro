@@ -102,4 +102,25 @@ describe('keyboard shortcut registry wiring', () => {
 		expect(overlap(DEFAULT_SHORTCUTS, TAB_SHORTCUTS)).toEqual([]);
 		expect(overlap(TAB_SHORTCUTS, FIXED_SHORTCUTS)).toEqual([]);
 	});
+
+	// Multi-window (Phase 6): agent cycling and the Command-K / agent switcher are
+	// scoped to the owning window. The shortcut-help modal renders a "Window" badge
+	// off the `windowScoped` flag, so guard the exact set of flagged ids here.
+	it('marks agent cycling and the agent switcher as windowScoped', () => {
+		const windowScopedIds = Object.values(DEFAULT_SHORTCUTS)
+			.filter((sc) => sc.windowScoped)
+			.map((sc) => sc.id)
+			.sort();
+		expect(windowScopedIds).toEqual(
+			['agentSwitcher', 'cycleNext', 'cyclePrev', 'quickAction'].sort()
+		);
+	});
+
+	it('does not flag window-global shortcuts as windowScoped', () => {
+		// Spot-check a few app-global shortcuts stay unflagged so the badge does
+		// not leak onto shortcuts that act across the whole app.
+		expect(DEFAULT_SHORTCUTS.newInstance.windowScoped).toBeUndefined();
+		expect(DEFAULT_SHORTCUTS.settings.windowScoped).toBeUndefined();
+		expect(DEFAULT_SHORTCUTS.help.windowScoped).toBeUndefined();
+	});
 });
