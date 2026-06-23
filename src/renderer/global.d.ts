@@ -3795,6 +3795,11 @@ interface MaestroAPI {
 			leftPanelCollapsed: boolean;
 			rightPanelCollapsed: boolean;
 		} | null>;
+		// Persist the calling window's panel-collapse UI state (per-window).
+		setPanelState: (panel: {
+			leftPanelCollapsed?: boolean;
+			rightPanelCollapsed?: boolean;
+		}) => Promise<void>;
 		getBounds: (
 			windowId?: string
 		) => Promise<{ x: number; y: number; width: number; height: number } | null>;
