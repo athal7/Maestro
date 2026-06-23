@@ -1315,6 +1315,10 @@ quitHandler = createQuitHandler({
 	stopSettingsWatcher: () => settingsWatcher.stop(),
 	powerManager,
 	stopSessionCleanup,
+	// Multi-window persistence: snapshot every window's layout to the window-state
+	// store on quit so the next launch can restore it (see window-state-persistence).
+	windowStateStore,
+	getWindowRegistry: () => windowRegistry,
 });
 quitHandler.setup();
 

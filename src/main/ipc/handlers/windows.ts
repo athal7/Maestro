@@ -23,6 +23,7 @@ import type {
 } from '../../../shared/window-types';
 import type { RegisteredWindow, WindowRegistry } from '../../window-registry';
 import type { WindowManager } from '../../app-lifecycle/window-manager';
+import { registeredWindowToWindowState } from '../../window-state-persistence';
 import { requireDependency, withIpcErrorLogging } from '../../utils/ipcHandler';
 import { logger } from '../../utils/logger';
 
@@ -67,31 +68,6 @@ function toWindowInfo(entry: RegisteredWindow): WindowInfo {
 		isMain: entry.isMain,
 		sessionIds: [...entry.sessionIds],
 		activeSessionId: null,
-	};
-}
-
-/**
- * Build the full {@link WindowState} for a window from its live `BrowserWindow`
- * bounds plus the registry's session ownership and per-window panel-collapse
- * state. Active-agent state is renderer-driven and not yet tracked, so it falls
- * back to `null` for this phase; panel collapse round-trips through the registry
- * (seeded expanded, written by `windows:setPanelState`).
- */
-function toWindowState(entry: RegisteredWindow): WindowState {
-	const { browserWindow } = entry;
-	const bounds = browserWindow.getBounds();
-	return {
-		id: entry.id,
-		x: bounds.x,
-		y: bounds.y,
-		width: bounds.width,
-		height: bounds.height,
-		isMaximized: browserWindow.isMaximized(),
-		isFullScreen: browserWindow.isFullScreen(),
-		sessionIds: [...entry.sessionIds],
-		activeSessionId: null,
-		leftPanelCollapsed: entry.leftPanelCollapsed,
-		rightPanelCollapsed: entry.rightPanelCollapsed,
 	};
 }
 
@@ -290,7 +266,7 @@ export function registerWindowsHandlers(deps: WindowsHandlerDependencies): void 
 	ipcMain.handle('windows:getState', (event: Electron.IpcMainInvokeEvent): WindowState | null => {
 		const registry = requireDependency(getWindowRegistry, 'Window registry');
 		const entry = resolveCallingWindow(event, registry);
-		return entry ? toWindowState(entry) : null;
+		return entry ? registeredWindowToWindowState(entry) : null;
 	});
 
 	// Persist the calling window's panel-collapse UI state (per-window, not a

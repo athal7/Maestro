@@ -4,9 +4,13 @@
  */
 
 import { app, ipcMain, BrowserWindow } from 'electron';
+import type Store from 'electron-store';
 import { logger } from '../utils/logger';
 import type { ProcessManager } from '../process-manager';
 import type { WebServer } from '../web-server';
+import type { WindowState } from '../stores/types';
+import type { WindowRegistry } from '../window-registry';
+import { saveAllWindowStates } from '../window-state-persistence';
 import { tunnelManager as tunnelManagerInstance } from '../tunnel-manager';
 import type { HistoryManager } from '../history-manager';
 import { isWebContentsAvailable } from '../utils/safe-send';
@@ -106,6 +110,16 @@ export interface QuitHandlerDependencies {
 	powerManager: typeof powerManagerInstance;
 	/** Function to stop group chat moderator cleanup interval */
 	stopSessionCleanup?: () => void;
+	/**
+	 * Window-state store. When provided alongside {@link getWindowRegistry}, the
+	 * full multi-window layout (bounds, display mode, owned agents, panel state)
+	 * is snapshotted to it during quit cleanup so the next launch can restore it.
+	 * Optional for the phased multi-window rollout and for tests that don't
+	 * exercise persistence.
+	 */
+	windowStateStore?: Store<WindowState>;
+	/** Registry of every open window, the source of truth for the saved layout. */
+	getWindowRegistry?: () => WindowRegistry | null;
 }
 
 /** Quit handler state */
@@ -164,6 +178,8 @@ export function createQuitHandler(deps: QuitHandlerDependencies): QuitHandler {
 		stopSettingsWatcher,
 		powerManager,
 		stopSessionCleanup,
+		windowStateStore,
+		getWindowRegistry,
 	} = deps;
 
 	const state: QuitHandlerState = {
@@ -323,6 +339,16 @@ export function createQuitHandler(deps: QuitHandlerDependencies): QuitHandler {
 	 */
 	function performCleanup(): void {
 		logger.info('Application shutting down', 'Shutdown');
+
+		// Snapshot the multi-window layout first, while every window is still open
+		// and its bounds are valid (windows are destroyed after before-quit). This
+		// is additive to the legacy per-window 'close' save in window-manager.ts and
+		// never throws, so it can't disrupt the rest of cleanup. Skipped when the
+		// window-state store / registry weren't injected (phased rollout, tests).
+		const windowRegistry = getWindowRegistry?.();
+		if (windowStateStore && windowRegistry) {
+			saveAllWindowStates(windowStateStore, windowRegistry);
+		}
 
 		// Stop history manager watcher
 		getHistoryManager().stopWatching();
