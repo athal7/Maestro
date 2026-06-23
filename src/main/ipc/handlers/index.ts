@@ -68,7 +68,11 @@ import { registerFeedbackHandlers } from './feedback';
 import { registerMaestroCliHandlers } from './maestro-cli';
 import { registerPromptsHandlers } from './prompts';
 import { registerMemoryHandlers } from './memory';
-import { registerWindowsHandlers, WindowsHandlerDependencies } from './windows';
+import {
+	registerWindowsHandlers,
+	wireWindowRegistryBroadcast,
+	WindowsHandlerDependencies,
+} from './windows';
 import { AgentDetector } from '../../agents';
 import { ProcessManager } from '../../process-manager';
 import { WebServer } from '../../web-server';
@@ -134,6 +138,7 @@ export { registerMaestroCliHandlers };
 export { registerPromptsHandlers };
 export { registerMemoryHandlers };
 export { registerWindowsHandlers };
+export { wireWindowRegistryBroadcast };
 export type { WindowsHandlerDependencies };
 export type { AgentsHandlerDependencies };
 export type { ProcessHandlerDependencies };

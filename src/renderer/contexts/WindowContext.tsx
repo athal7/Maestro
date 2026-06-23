@@ -18,9 +18,12 @@
  * `openSession` therefore focuses the owning window instead of stealing an
  * agent that already lives elsewhere.
  *
- * NOTE: the `windows:sessionMoved` broadcast listener that keeps this in sync
- * when agents move between windows is wired in a later Phase 2 task; `hydrate`
- * is factored out so it can be reused as that listener's refresh callback.
+ * Staying in sync: the main process broadcasts `windows:sessionMoved` to every
+ * window whenever session ownership changes (`WindowRegistry.moveSession` /
+ * `setSessionsForWindow`). This provider subscribes via
+ * `window.maestro.windows.onSessionMoved` and re-runs `hydrate` on each
+ * broadcast, so a window's scoped agents and the Left Bar's cross-window badges
+ * follow an agent entering or leaving any window.
  */
 
 import {
@@ -155,6 +158,22 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 
 	useEffect(() => {
 		void hydrate();
+	}, [hydrate]);
+
+	// Refresh on every `windows:sessionMoved` broadcast so this window follows an
+	// agent entering or leaving any window. We subscribe through the preload
+	// callback rather than `useEventListener`: under contextIsolation a main->
+	// renderer IPC broadcast surfaces as a callback (the codebase's own bridge in
+	// `useRemoteIntegration` does the IPC->DOM re-dispatch in a renderer hook, not
+	// the preload), and WindowContext is the single, root-level consumer here, so
+	// a direct subscription with cleanup is the simplest reliable wiring. Any
+	// ownership change can shift this window's cross-window badges, so we always
+	// re-hydrate (the full registry read) instead of diffing the payload.
+	useEffect(() => {
+		const unsubscribe = window.maestro.windows.onSessionMoved(() => {
+			void hydrate();
+		});
+		return unsubscribe;
 	}, [hydrate]);
 
 	// Agents claimed by OTHER windows. The primary window is the catch-all owner,

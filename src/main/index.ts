@@ -90,6 +90,7 @@ import {
 	registerPromptsHandlers,
 	registerMemoryHandlers,
 	registerWindowsHandlers,
+	wireWindowRegistryBroadcast,
 	setupLoggerEventForwarding,
 	cleanupAllGroomingSessions,
 	getActiveGroomingSessionCount,
@@ -1499,6 +1500,11 @@ function setupIpcHandlers() {
 		getWindowRegistry: () => windowRegistry,
 		getWindowManager: () => windowManager,
 	});
+	// Push registry ownership moves out to every window so each renderer's
+	// WindowContext can refresh which agents it surfaces (and the Left Bar's
+	// cross-window badges). The registry is a module-scope instance, so pass it
+	// directly rather than through the handlers' lazy getter.
+	wireWindowRegistryBroadcast(windowRegistry);
 
 	// Register Context Merge handlers for session context transfer and grooming
 	registerContextHandlers({

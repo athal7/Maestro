@@ -8,7 +8,7 @@
  */
 
 import { ipcRenderer } from 'electron';
-import type { WindowInfo, WindowState } from '../../shared/window-types';
+import type { WindowInfo, WindowSessionMovedPayload, WindowState } from '../../shared/window-types';
 
 /** On-screen rectangle returned by the bounds queries. */
 export interface WindowBounds {
@@ -88,6 +88,22 @@ export function createWindowsApi() {
 		 */
 		findWindowAtPoint: (screenX: number, screenY: number): Promise<string | null> =>
 			ipcRenderer.invoke('windows:findWindowAtPoint', screenX, screenY),
+
+		/**
+		 * Subscribe to `windows:sessionMoved` broadcasts. The main process emits one
+		 * to every window whenever session ownership changes (an agent moves between
+		 * windows or a window's owned set is replaced), so each renderer can refresh
+		 * which agents it surfaces and its cross-window badges.
+		 * @param callback - Invoked with the change payload on every broadcast
+		 * @returns An unsubscribe function
+		 */
+		onSessionMoved: (callback: (payload: WindowSessionMovedPayload) => void): (() => void) => {
+			const handler = (_event: unknown, payload: WindowSessionMovedPayload) => callback(payload);
+			ipcRenderer.on('windows:sessionMoved', handler);
+			return () => {
+				ipcRenderer.removeListener('windows:sessionMoved', handler);
+			};
+		},
 	};
 }
 

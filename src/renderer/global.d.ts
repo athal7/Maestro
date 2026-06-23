@@ -3799,6 +3799,16 @@ interface MaestroAPI {
 			windowId?: string
 		) => Promise<{ x: number; y: number; width: number; height: number } | null>;
 		findWindowAtPoint: (screenX: number, screenY: number) => Promise<string | null>;
+		// Subscribe to session-ownership move broadcasts; returns an unsubscribe fn.
+		onSessionMoved: (
+			callback: (payload: {
+				type: 'session-moved' | 'sessions-changed';
+				windowId?: string;
+				sessionId?: string;
+				fromWindowId?: string;
+				toWindowId?: string;
+			}) => void
+		) => () => void;
 	};
 }
 

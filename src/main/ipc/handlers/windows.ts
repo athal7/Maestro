@@ -13,13 +13,25 @@
  */
 
 import { BrowserWindow, ipcMain } from 'electron';
-import type { WindowInfo, WindowState } from '../../../shared/window-types';
+import type {
+	WindowInfo,
+	WindowSessionMovedPayload,
+	WindowState,
+} from '../../../shared/window-types';
 import type { RegisteredWindow, WindowRegistry } from '../../window-registry';
 import type { WindowManager } from '../../app-lifecycle/window-manager';
 import { requireDependency, withIpcErrorLogging } from '../../utils/ipcHandler';
 import { logger } from '../../utils/logger';
 
 const LOG_CONTEXT = '[Windows]';
+
+/**
+ * Channel the main process broadcasts on whenever window<->session ownership
+ * changes. Every open window's renderer listens (see the preload
+ * `windows.onSessionMoved` API + `WindowContext`) and refreshes which agents it
+ * surfaces plus the Left Bar's cross-window badges.
+ */
+export const WINDOW_SESSION_MOVED_CHANNEL = 'windows:sessionMoved';
 
 /** On-screen rectangle returned by the bounds queries (Phase 3 tab drag). */
 interface WindowBounds {
@@ -86,6 +98,41 @@ function resolveCallingWindow(
 	const browserWindow = BrowserWindow.fromWebContents(event.sender);
 	if (!browserWindow) return undefined;
 	return registry.getAll().find((entry) => entry.browserWindow === browserWindow);
+}
+
+/**
+ * Subscribe to the {@link WindowRegistry} change signal and broadcast session
+ * ownership moves to every open window on {@link WINDOW_SESSION_MOVED_CHANNEL}.
+ *
+ * Only the two ownership mutations are forwarded: `moveSession` (emits
+ * `session-moved`) and `setSessionsForWindow` (emits `sessions-changed`). Window
+ * open/close (`created`/`removed`) is intentionally NOT broadcast - an empty new
+ * window changes no badges, and any session move into/out of a window already
+ * emits `session-moved`. The broadcast goes to ALL windows (not just the ones
+ * named in the change) because cross-window badges depend on the full ownership
+ * map; each renderer re-reads the registry and decides what changed for it.
+ *
+ * Returns an unsubscribe function so callers (and tests) can tear the
+ * subscription down.
+ */
+export function wireWindowRegistryBroadcast(registry: WindowRegistry): () => void {
+	return registry.onChange((change) => {
+		if (change.type !== 'session-moved' && change.type !== 'sessions-changed') return;
+		const payload: WindowSessionMovedPayload = {
+			type: change.type,
+			windowId: change.windowId,
+			sessionId: change.sessionId,
+			fromWindowId: change.fromWindowId,
+			toWindowId: change.toWindowId,
+		};
+		for (const entry of registry.getAll()) {
+			const { browserWindow } = entry;
+			if (browserWindow.isDestroyed()) continue;
+			const { webContents } = browserWindow;
+			if (webContents.isDestroyed()) continue;
+			webContents.send(WINDOW_SESSION_MOVED_CHANNEL, payload);
+		}
+	});
 }
 
 /**

@@ -66,6 +66,9 @@ describe('WindowContext', () => {
 		vi.mocked(windows().focusWindow).mockResolvedValue({ focused: true });
 		vi.mocked(windows().create).mockResolvedValue(null);
 		vi.mocked(windows().moveSession).mockResolvedValue({ moved: true });
+		// Default the broadcast subscription to a no-op unsubscribe; the refresh
+		// tests capture the registered callback to simulate a broadcast.
+		vi.mocked(windows().onSessionMoved).mockReturnValue(() => {});
 	});
 
 	afterEach(() => {
@@ -425,6 +428,53 @@ describe('WindowContext', () => {
 				})
 			);
 			expect(result.current.getSessionWindow('a')).toBeNull();
+		});
+	});
+
+	describe('windows:sessionMoved broadcast', () => {
+		it('re-hydrates scope and window list when a broadcast arrives', async () => {
+			setUrl('/?windowId=win-2');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a'], activeSessionId: 'a' })
+			);
+			vi.mocked(windows().list).mockResolvedValue([
+				makeInfo({ id: 'primary-1', isMain: true }),
+				makeInfo({ id: 'win-2', sessionIds: ['a'], activeSessionId: 'a' }),
+			]);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.sessionIds).toEqual(['a']));
+
+			// Agent 'b' moves INTO this window: the registry now reports a + b.
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-2', sessionIds: ['a', 'b'], activeSessionId: 'a' })
+			);
+
+			// Fire the broadcast the preload would deliver on the IPC channel.
+			const handler = vi.mocked(windows().onSessionMoved).mock.calls[0][0];
+			await act(async () => {
+				handler({
+					type: 'session-moved',
+					sessionId: 'b',
+					fromWindowId: 'primary-1',
+					toWindowId: 'win-2',
+				});
+			});
+
+			await waitFor(() => expect(result.current.sessionIds).toEqual(['a', 'b']));
+		});
+
+		it('subscribes on mount and unsubscribes on unmount', async () => {
+			const unsubscribe = vi.fn();
+			vi.mocked(windows().onSessionMoved).mockReturnValue(unsubscribe);
+			setUrl('/?windowId=win-1');
+			vi.mocked(windows().getState).mockResolvedValue(makeState({ id: 'win-1' }));
+
+			const { unmount } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(windows().onSessionMoved).toHaveBeenCalled());
+
+			unmount();
+			expect(unsubscribe).toHaveBeenCalled();
 		});
 	});
 

@@ -645,6 +645,9 @@ const mockMaestro = {
 		getState: vi.fn().mockResolvedValue(null),
 		getBounds: vi.fn().mockResolvedValue(null),
 		findWindowAtPoint: vi.fn().mockResolvedValue(null),
+		// Returns an unsubscribe fn (default no-op) so WindowProvider's effect can
+		// clean up. Window tests capture the registered callback to fire broadcasts.
+		onSessionMoved: vi.fn(() => () => {}),
 	},
 	// Synchronous platform string (replaces async os.getPlatform IPC)
 	platform: 'darwin',

@@ -48,7 +48,10 @@ vi.mock('../../../../main/utils/ipcHandler', () => ({
 	},
 }));
 
-import { registerWindowsHandlers } from '../../../../main/ipc/handlers/windows';
+import {
+	registerWindowsHandlers,
+	wireWindowRegistryBroadcast,
+} from '../../../../main/ipc/handlers/windows';
 import { WindowRegistry } from '../../../../main/window-registry';
 
 /** Build a cast-mock BrowserWindow with the surface the handlers touch. */
@@ -62,8 +65,18 @@ function makeFakeWindow(overrides: Partial<Record<string, unknown>> = {}): Brows
 		restore: vi.fn(),
 		focus: vi.fn(),
 		close: vi.fn(),
+		// webContents.send is the broadcast surface wireWindowRegistryBroadcast uses.
+		webContents: {
+			send: vi.fn(),
+			isDestroyed: vi.fn(() => false),
+		},
 		...overrides,
 	} as unknown as BrowserWindow;
+}
+
+/** The mocked webContents.send for a fake window, typed for assertions. */
+function sendOf(win: BrowserWindow): ReturnType<typeof vi.fn> {
+	return (win as unknown as { webContents: { send: ReturnType<typeof vi.fn> } }).webContents.send;
 }
 
 /** A fake IPC invoke event whose sender resolves to `browserWindow`. */
@@ -370,6 +383,90 @@ describe('Windows IPC Handlers', () => {
 
 			expect(inside).toBe(id);
 			expect(outside).toBeNull();
+		});
+	});
+
+	describe('wireWindowRegistryBroadcast', () => {
+		it('broadcasts a session move to every window with the change payload', () => {
+			const fromWin = makeFakeWindow();
+			const toWin = makeFakeWindow();
+			const from = registry.create({
+				browserWindow: fromWin,
+				sessionIds: ['agent-1'],
+				isMain: true,
+			});
+			const to = registry.create({ browserWindow: toWin, sessionIds: [], isMain: false });
+
+			// Wire AFTER creating windows so the 'created' events are not in scope.
+			wireWindowRegistryBroadcast(registry);
+			registry.moveSession('agent-1', from, to);
+
+			const payload = {
+				type: 'session-moved',
+				sessionId: 'agent-1',
+				fromWindowId: from,
+				toWindowId: to,
+				windowId: undefined,
+			};
+			expect(sendOf(fromWin)).toHaveBeenCalledWith('windows:sessionMoved', payload);
+			expect(sendOf(toWin)).toHaveBeenCalledWith('windows:sessionMoved', payload);
+		});
+
+		it('broadcasts a sessions-changed (setSessionsForWindow) replacement', () => {
+			const win = makeFakeWindow();
+			const id = registry.create({ browserWindow: win, sessionIds: ['a'], isMain: true });
+
+			wireWindowRegistryBroadcast(registry);
+			registry.setSessionsForWindow(id, ['a', 'b']);
+
+			expect(sendOf(win)).toHaveBeenCalledWith('windows:sessionMoved', {
+				type: 'sessions-changed',
+				windowId: id,
+				sessionId: undefined,
+				fromWindowId: undefined,
+				toWindowId: undefined,
+			});
+		});
+
+		it('does not broadcast on window create or remove', () => {
+			const win = makeFakeWindow();
+			const id = registry.create({ browserWindow: win, sessionIds: [], isMain: true });
+
+			wireWindowRegistryBroadcast(registry);
+			// A second create + a remove: neither is a session-ownership change.
+			registry.create({ browserWindow: makeFakeWindow(), sessionIds: [], isMain: false });
+			registry.remove(id);
+
+			expect(sendOf(win)).not.toHaveBeenCalled();
+		});
+
+		it('skips destroyed windows and destroyed webContents', () => {
+			const live = makeFakeWindow();
+			const destroyedWin = makeFakeWindow({ isDestroyed: vi.fn(() => true) });
+			const deadContents = makeFakeWindow({
+				webContents: { send: vi.fn(), isDestroyed: vi.fn(() => true) },
+			});
+			const from = registry.create({ browserWindow: live, sessionIds: ['x'], isMain: true });
+			const to = registry.create({ browserWindow: destroyedWin, sessionIds: [], isMain: false });
+			registry.create({ browserWindow: deadContents, sessionIds: [], isMain: false });
+
+			wireWindowRegistryBroadcast(registry);
+			registry.moveSession('x', from, to);
+
+			expect(sendOf(live)).toHaveBeenCalledTimes(1);
+			expect(sendOf(destroyedWin)).not.toHaveBeenCalled();
+			expect(sendOf(deadContents)).not.toHaveBeenCalled();
+		});
+
+		it('stops broadcasting after unsubscribe', () => {
+			const win = makeFakeWindow();
+			const id = registry.create({ browserWindow: win, sessionIds: ['a'], isMain: true });
+
+			const unsubscribe = wireWindowRegistryBroadcast(registry);
+			unsubscribe();
+			registry.setSessionsForWindow(id, ['a', 'b']);
+
+			expect(sendOf(win)).not.toHaveBeenCalled();
 		});
 	});
 

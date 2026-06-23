@@ -56,3 +56,19 @@ export interface WindowInfo {
 	sessionIds: string[];
 	activeSessionId: string | null;
 }
+
+/**
+ * Payload pushed to every window on the `windows:sessionMoved` broadcast channel
+ * whenever window<->session ownership changes in the main-process registry.
+ * Carries which mutation fired (`session-moved` from `moveSession`,
+ * `sessions-changed` from `setSessionsForWindow`) plus the affected window/agent
+ * ids. Renderers react by re-reading their scoped agents and the window list, so
+ * the fields are advisory context rather than a strict diff to apply.
+ */
+export interface WindowSessionMovedPayload {
+	type: 'session-moved' | 'sessions-changed';
+	windowId?: string;
+	sessionId?: string;
+	fromWindowId?: string;
+	toWindowId?: string;
+}

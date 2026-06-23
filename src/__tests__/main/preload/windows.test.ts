@@ -10,10 +10,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock electron ipcRenderer
 const mockInvoke = vi.fn();
+const mockOn = vi.fn();
+const mockRemoveListener = vi.fn();
 
 vi.mock('electron', () => ({
 	ipcRenderer: {
 		invoke: (...args: unknown[]) => mockInvoke(...args),
+		on: (...args: unknown[]) => mockOn(...args),
+		removeListener: (...args: unknown[]) => mockRemoveListener(...args),
 	},
 }));
 
@@ -122,5 +126,38 @@ describe('Windows Preload API', () => {
 
 		expect(mockInvoke).toHaveBeenCalledWith('windows:findWindowAtPoint', 120, 240);
 		expect(result).toBe('w6');
+	});
+
+	describe('onSessionMoved', () => {
+		it('subscribes to the windows:sessionMoved channel and forwards the payload', () => {
+			const callback = vi.fn();
+
+			api.onSessionMoved(callback);
+
+			expect(mockOn).toHaveBeenCalledWith('windows:sessionMoved', expect.any(Function));
+
+			// The preload strips the IPC event arg and hands the renderer just the payload.
+			const handler = mockOn.mock.calls[0][1] as (event: unknown, payload: unknown) => void;
+			const payload = {
+				type: 'session-moved' as const,
+				sessionId: 'agent-1',
+				fromWindowId: 'w1',
+				toWindowId: 'w2',
+			};
+			handler({}, payload);
+
+			expect(callback).toHaveBeenCalledWith(payload);
+		});
+
+		it('returns an unsubscribe function that removes the same listener', () => {
+			const callback = vi.fn();
+
+			const unsubscribe = api.onSessionMoved(callback);
+			const handler = mockOn.mock.calls[0][1];
+
+			unsubscribe();
+
+			expect(mockRemoveListener).toHaveBeenCalledWith('windows:sessionMoved', handler);
+		});
 	});
 });
