@@ -204,7 +204,7 @@ export function registerAllHandlers(deps: HandlerDependencies): void {
 	registerAutorunHandlers(deps);
 	registerPlaybooksHandlers(deps);
 	registerHistoryHandlers({
-		safeSend: createSafeSend(deps.getMainWindow),
+		safeSend: createSafeSend(() => BrowserWindow.getAllWindows()),
 		getMaxEntries: () => deps.settingsStore.get('maxLogBuffer', 5000) as number,
 		getSshRemoteById,
 		getSessionById: (id: string) => {
@@ -225,7 +225,7 @@ export function registerAllHandlers(deps: HandlerDependencies): void {
 		agentConfigsStore: deps.agentConfigsStore,
 		settingsStore: deps.settingsStore,
 		getMainWindow: deps.getMainWindow,
-		safeSend: createSafeSend(deps.getMainWindow),
+		safeSend: createSafeSend(() => BrowserWindow.getAllWindows()),
 		sessionsStore: deps.sessionsStore,
 	});
 	registerPersistenceHandlers({

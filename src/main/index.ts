@@ -366,8 +366,11 @@ let cueEngine: CueEngine | null = null;
 let usageRefreshScheduler: UsageRefreshScheduler | null = null;
 let interactiveReplayController: InteractiveReplayController<ProcessSpawnConfig> | null = null;
 
-// Create safeSend with dependency injection (Phase 2 refactoring)
-const safeSend = createSafeSend(() => mainWindow);
+// Create safeSend with dependency injection (Phase 2 refactoring).
+// Broadcasts to EVERY open window, not just the primary one - see the
+// MULTI-WINDOW INVARIANT in safe-send.ts. Renderers filter agent-scoped
+// process:* events to the agents they own.
+const safeSend = createSafeSend(() => BrowserWindow.getAllWindows());
 
 // Hydrate capability snapshots from disk and wire IPC broadcaster so the
 // renderer status pills update live as detection / spawn-error events fire.
