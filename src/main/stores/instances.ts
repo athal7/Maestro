@@ -38,6 +38,7 @@ import {
 } from './defaults';
 
 import { getCustomSyncPath } from './utils';
+import { migrateWindowStateToMultiWindow } from './migrations/multi-window-state';
 
 function deserializeStoreJson<T = Record<string, unknown>>(value: string): T {
 	return parseJsonWithBom<T>(value);
@@ -146,6 +147,11 @@ export function initializeStores(options: StoreInitOptions): {
 		defaults: WINDOW_STATE_DEFAULTS,
 		deserialize: deserializeStoreJson,
 	});
+
+	// Fold any legacy single-window bounds into the multi-window schema. Runs
+	// once (keyed on the persisted data), never throws - a window-state hiccup
+	// must not block startup.
+	migrateWindowStateToMultiWindow(_windowStateStore);
 
 	// Claude session origins - tracks which sessions were created by Maestro
 	_claudeSessionOriginsStore = new Store<ClaudeSessionOriginsData>({
