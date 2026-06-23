@@ -205,6 +205,7 @@ import {
 	getTabDisplayName,
 	isSoleAiTabReplacement,
 } from './utils/tabHelpers';
+import { buildThinkingItems } from './utils/thinkingItems';
 // validateNewSession moved to useSymphonyContribution, useSessionCrud hooks
 // formatLogsForClipboard moved to useTabExportHandlers hook
 // getSlashCommandDescription moved to useWizardHandlers
@@ -1424,32 +1425,18 @@ function MaestroConsoleInner() {
 
 	// PERF: Memoize thinkingItems at App level to avoid passing full sessions array to children.
 	// This prevents InputArea from re-rendering on unrelated session updates (e.g., terminal output).
-	// Flat list of (session, tab) pairs — one entry per busy tab across all sessions.
+	// Flat list of (session, tab) pairs — one entry per busy tab across the agents this window owns.
 	// This allows the ThinkingStatusPill to show all active work, even when multiple tabs
 	// within the same agent are busy in parallel.
-	const thinkingItems: ThinkingItem[] = useMemo(() => {
-		const items: ThinkingItem[] = [];
-		for (const session of sessions) {
-			if (session.state === 'busy' && session.busySource === 'ai') {
-				const busyTabs = session.aiTabs?.filter((t) => t.state === 'busy');
-				if (busyTabs && busyTabs.length > 0) {
-					for (const tab of busyTabs) {
-						items.push({ session, tab });
-					}
-				} else if (!session.orphanedThinkingTabs?.length) {
-					// Legacy: session is busy but no individual tab-level tracking
-					items.push({ session, tab: null });
-				}
-			}
-			// Closed-but-still-thinking tabs: keep showing them on the pill until
-			// the agent process actually exits. The exit/error listeners remove
-			// entries from orphanedThinkingTabs when the underlying process is gone.
-			for (const orphan of session.orphanedThinkingTabs ?? []) {
-				items.push({ session, tab: orphan });
-			}
-		}
-		return items;
-	}, [sessions]);
+	// Multi-window: gate on WindowContext.ownsSession so a window's pill never surfaces an agent
+	// (or its AutoRun) owned by another window - every renderer holds ALL agents because the main
+	// process broadcasts every agent's state to every window. Outside a WindowProvider (web /
+	// isolation tests) ownsSession is undefined, so buildThinkingItems includes every session.
+	const ownsSession = windowCtx?.ownsSession;
+	const thinkingItems: ThinkingItem[] = useMemo(
+		() => buildThinkingItems(sessions, ownsSession),
+		[sessions, ownsSession]
+	);
 
 	// addLogToTab/addLogToActiveTab now used directly via store in useWizardHandlers
 
