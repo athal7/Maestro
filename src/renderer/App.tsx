@@ -1940,6 +1940,10 @@ function MaestroConsoleInner() {
 		starredItems,
 		activateStarredItem,
 		navIndexMap,
+		// Multi-window: scope Cmd+[/] cycling to agents THIS window owns. Reuses the
+		// same ownsSession predicate the thinking pill uses (line ~1422); undefined
+		// outside a WindowProvider, so single-window/web cycling is unchanged.
+		ownsSession,
 	});
 
 	// --- KEYBOARD NAVIGATION ---
