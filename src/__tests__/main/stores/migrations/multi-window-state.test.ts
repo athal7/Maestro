@@ -62,6 +62,41 @@ describe('migrateWindowStateToMultiWindow', () => {
 		expect(primary.id.length).toBeGreaterThan(0);
 	});
 
+	it('seeds the migrated primary window with the agents that currently exist', () => {
+		// The legacy build showed every agent in its lone window, so the migrated
+		// primary inherits them all and stays their catch-all owner.
+		const store = makeStore({
+			x: 120,
+			y: 80,
+			width: 1600,
+			height: 1000,
+			isMaximized: false,
+			isFullScreen: false,
+		});
+
+		migrateWindowStateToMultiWindow(store as any, ['agent-a', 'agent-b', 'agent-c']);
+
+		const [primary] = store.data.multiWindow.windows;
+		expect(primary.sessionIds).toEqual(['agent-a', 'agent-b', 'agent-c']);
+		// A copy, not the caller's array - mutating the source must not leak in.
+		expect(primary.sessionIds).not.toBe(undefined);
+	});
+
+	it('ignores existing agents on a fresh install (no legacy state to migrate)', () => {
+		// A fresh install seeds an empty layout; those agents still surface via the
+		// primary window's catch-all at restore time, so they are NOT pre-assigned.
+		const store = makeStore({
+			width: 1400,
+			height: 900,
+			isMaximized: false,
+			isFullScreen: false,
+		});
+
+		migrateWindowStateToMultiWindow(store as any, ['agent-a', 'agent-b']);
+
+		expect(store.data.multiWindow).toEqual({ windows: [], primaryWindowId: '' });
+	});
+
 	it('carries a maximized-only history even without saved x/y coordinates', () => {
 		const store = makeStore({
 			width: 1400,

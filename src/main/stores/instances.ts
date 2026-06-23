@@ -39,6 +39,7 @@ import {
 
 import { getCustomSyncPath } from './utils';
 import { migrateWindowStateToMultiWindow } from './migrations/multi-window-state';
+import { readExistingAgentIds } from '../window-state-persistence';
 
 function deserializeStoreJson<T = Record<string, unknown>>(value: string): T {
 	return parseJsonWithBom<T>(value);
@@ -150,8 +151,10 @@ export function initializeStores(options: StoreInitOptions): {
 
 	// Fold any legacy single-window bounds into the multi-window schema. Runs
 	// once (keyed on the persisted data), never throws - a window-state hiccup
-	// must not block startup.
-	migrateWindowStateToMultiWindow(_windowStateStore);
+	// must not block startup. The legacy build showed every agent in its lone
+	// window, so the migrated primary inherits the agents that currently exist
+	// and stays their catch-all owner.
+	migrateWindowStateToMultiWindow(_windowStateStore, readExistingAgentIds(_sessionsStore));
 
 	// Claude session origins - tracks which sessions were created by Maestro
 	_claudeSessionOriginsStore = new Store<ClaudeSessionOriginsData>({

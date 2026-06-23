@@ -16,10 +16,12 @@ import { WindowRegistry } from '../window-registry';
 import {
 	buildMultiWindowState,
 	planWindowRestore,
+	readExistingAgentIds,
 	registeredWindowToWindowState,
 	saveAllWindowStates,
 	saveWindowState,
 } from '../window-state-persistence';
+import type { SessionsData } from '../stores/types';
 import type {
 	MultiWindowState,
 	WindowState as PersistedWindowState,
@@ -346,6 +348,51 @@ describe('window-state-persistence', () => {
 
 			expect(specs[0]).toMatchObject({ isPrimary: true, bounds: { id: 'first' } });
 			expect(specs[1]).toMatchObject({ isPrimary: false, bounds: { id: 'second' } });
+		});
+	});
+
+	describe('readExistingAgentIds', () => {
+		/** A fake sessions store whose `get('sessions', [])` returns the given rows. */
+		function makeSessionsStore(sessions: unknown): Pick<Store<SessionsData>, 'get'> {
+			return {
+				get: vi.fn((_key: string, fallback?: unknown) =>
+					sessions === undefined ? fallback : sessions
+				),
+			} as unknown as Pick<Store<SessionsData>, 'get'>;
+		}
+
+		it('returns the id of every existing agent in order', () => {
+			const store = makeSessionsStore([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+
+			expect(readExistingAgentIds(store)).toEqual(['a', 'b', 'c']);
+		});
+
+		it('returns an empty array when there are no agents', () => {
+			expect(readExistingAgentIds(makeSessionsStore([]))).toEqual([]);
+		});
+
+		it('skips non-string ids defensively in a corrupt store', () => {
+			const store = makeSessionsStore([
+				{ id: 'a' },
+				{ id: 42 },
+				{},
+				null,
+				{ id: 'b' },
+			]);
+
+			expect(readExistingAgentIds(store)).toEqual(['a', 'b']);
+		});
+
+		it('returns an empty array (never throws) when get ignores the fallback', () => {
+			// A stub/corrupt store whose `get` returns undefined regardless of the
+			// fallback. This runs at startup outside any try/catch, so it must not
+			// throw "sessions is not iterable".
+			const store = {
+				get: vi.fn(() => undefined),
+			} as unknown as Pick<Store<SessionsData>, 'get'>;
+
+			expect(() => readExistingAgentIds(store)).not.toThrow();
+			expect(readExistingAgentIds(store)).toEqual([]);
 		});
 	});
 });

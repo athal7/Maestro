@@ -16,7 +16,7 @@
 
 import type Store from 'electron-store';
 import type { MultiWindowState, WindowState } from '../shared/window-types';
-import type { WindowState as WindowStateStoreData } from './stores/types';
+import type { WindowState as WindowStateStoreData, SessionsData } from './stores/types';
 import type { RegisteredWindow, WindowRegistry } from './window-registry';
 import { logger } from './utils/logger';
 
@@ -127,6 +127,27 @@ export function saveWindowState(
 	const entry = registry.get(windowId);
 	if (!entry || entry.browserWindow.isDestroyed()) return;
 	saveAllWindowStates(store, registry);
+}
+
+/**
+ * Read the agent (session) IDs that currently exist from the sessions store.
+ *
+ * Both the startup restore (which prunes each saved window's owned agents
+ * against this set) and the legacy single-window migration (which seeds the
+ * migrated primary window with every previously-open agent) need the same
+ * "agents that still exist" list, so they share one reader rather than each
+ * re-deriving it. A non-array value (corrupt store, or a stub that ignores the
+ * fallback) yields an empty list, and non-string ids are skipped defensively -
+ * this runs at startup outside any try/catch, so it must never throw.
+ */
+export function readExistingAgentIds(sessionsStore: Pick<Store<SessionsData>, 'get'>): string[] {
+	const sessions = sessionsStore.get('sessions', []) as unknown;
+	if (!Array.isArray(sessions)) return [];
+	const ids: string[] = [];
+	for (const session of sessions as Array<{ id?: unknown }>) {
+		if (typeof session?.id === 'string') ids.push(session.id);
+	}
+	return ids;
 }
 
 /**
