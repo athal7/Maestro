@@ -159,6 +159,32 @@ export class WindowRegistry extends EventEmitter {
 	}
 
 	/**
+	 * Reclaim every session owned by `windowId` into the primary window so no
+	 * agent is ever orphaned when a secondary window closes. Each session is moved
+	 * through {@link moveSession}, preserving the single source of truth and the
+	 * per-move `session-moved` change signal every renderer reacts to.
+	 *
+	 * Returns the IDs that were reclaimed and the primary window they moved into.
+	 * `movedSessionIds` is empty (with the primary id still set) when the window
+	 * owned nothing. Returns `null` when there is nothing to reclaim *into*: the
+	 * window is unknown, it IS the primary, or no primary is registered. Callers
+	 * use the count to decide whether to surface a "moved" toast.
+	 */
+	reclaimSessionsToPrimary(
+		windowId: string
+	): { movedSessionIds: string[]; primaryWindowId: string } | null {
+		const source = this.windows.get(windowId);
+		if (!source || source.isMain) return null;
+		const primary = this.getPrimary();
+		if (!primary) return null;
+		const movedSessionIds = [...source.sessionIds];
+		for (const sessionId of movedSessionIds) {
+			this.moveSession(sessionId, windowId, primary.id);
+		}
+		return { movedSessionIds, primaryWindowId: primary.id };
+	}
+
+	/**
 	 * The ID of the first registered window whose screen bounds contain the
 	 * given point, or `null` if none do. Used by tab drag (Phase 3) to find the
 	 * drop-target window. Destroyed windows are skipped.

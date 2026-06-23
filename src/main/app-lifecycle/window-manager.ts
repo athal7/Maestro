@@ -21,6 +21,7 @@ import { generateUUID } from '../../shared/uuid';
 import type { WindowRegistry } from '../window-registry';
 import { saveWindowState, WINDOW_STATE_SAVE_DEBOUNCE_MS } from '../window-state-persistence';
 import { debounce } from '../utils/debounce';
+import { isWebContentsAvailable } from '../utils/safe-send';
 
 const BROWSER_TAB_PARTITION_PREFIX = 'persist:maestro-browser-session-';
 // `file:` is allowed so users can open local HTML they just generated
@@ -909,16 +910,44 @@ export function createWindowManager(deps: WindowManagerDependencies): WindowMana
 			windowRegistry?.create({ windowId, browserWindow, sessionIds, isMain: false });
 
 			browserWindow.on('closed', () => {
-				// Skip registry cleanup while the app is quitting - the registry is
-				// discarded with the process, so emitting a change then is pointless.
-				if (!getIsQuitting?.()) {
-					windowRegistry?.remove(windowId);
+				// Skip registry work while the app is quitting - the registry is
+				// discarded with the process, so reclaiming ownership or emitting a
+				// change then is pointless.
+				if (getIsQuitting?.() || !windowRegistry) return;
+
+				// Reclaim any agents still owned by this window into the primary so
+				// none are ever orphaned, THEN drop the closed window. The reclaim
+				// moves broadcast `session-moved` to every live renderer (Phase 5),
+				// so the primary's tab strip picks the agents up; a brief toast tells
+				// the user where they went.
+				const reclaimed = windowRegistry.reclaimSessionsToPrimary(windowId);
+				windowRegistry.remove(windowId);
+				if (reclaimed && reclaimed.movedSessionIds.length > 0) {
+					notifySessionsReclaimedToPrimary(windowRegistry, reclaimed.movedSessionIds.length);
 				}
 			});
 
 			return browserWindow;
 		},
 	};
+}
+
+/**
+ * Toast the primary window's renderer that agents from a just-closed secondary
+ * window were reclaimed into it. Reuses the existing `remote:notifyToast`
+ * pipeline (preload `onRemoteNotifyToast` -> renderer `notifyToast`) rather than
+ * a bespoke channel. Advisory only: a missing or destroyed primary renderer is
+ * a silent no-op.
+ */
+function notifySessionsReclaimedToPrimary(registry: WindowRegistry, count: number): void {
+	const primary = registry.getPrimary();
+	if (!primary || !isWebContentsAvailable(primary.browserWindow)) return;
+	const noun = count === 1 ? 'agent' : 'agents';
+	primary.browserWindow.webContents.send('remote:notifyToast', {
+		title: 'Window closed',
+		message: `${count} ${noun} moved to main window`,
+		color: 'theme' as const,
+	});
 }
 
 // Track if stub handlers have been registered (module-level to persist across createWindow calls)

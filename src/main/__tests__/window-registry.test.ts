@@ -168,6 +168,90 @@ describe('WindowRegistry', () => {
 		});
 	});
 
+	describe('reclaimSessionsToPrimary', () => {
+		it('moves every session from a secondary window into the primary', () => {
+			registry.create({
+				windowId: 'main',
+				isMain: true,
+				sessionIds: ['m1'],
+				browserWindow: makeWindow(),
+			});
+			registry.create({ windowId: 'w2', sessionIds: ['s1', 's2'], browserWindow: makeWindow() });
+
+			const result = registry.reclaimSessionsToPrimary('w2');
+
+			expect(result).toEqual({ movedSessionIds: ['s1', 's2'], primaryWindowId: 'main' });
+			expect(registry.get('main')?.sessionIds).toEqual(['m1', 's1', 's2']);
+			expect(registry.get('w2')?.sessionIds).toEqual([]);
+			expect(registry.getWindowForSession('s1')).toBe('main');
+			expect(registry.getWindowForSession('s2')).toBe('main');
+		});
+
+		it('emits a session-moved change per reclaimed session', () => {
+			registry.create({ windowId: 'main', isMain: true, browserWindow: makeWindow() });
+			registry.create({ windowId: 'w2', sessionIds: ['s1', 's2'], browserWindow: makeWindow() });
+			const listener = vi.fn();
+			registry.onChange(listener);
+
+			registry.reclaimSessionsToPrimary('w2');
+
+			const moves = listener.mock.calls
+				.map((c) => c[0] as WindowRegistryChange)
+				.filter((c) => c.type === 'session-moved');
+			expect(moves).toEqual([
+				expect.objectContaining({ sessionId: 's1', fromWindowId: 'w2', toWindowId: 'main' }),
+				expect.objectContaining({ sessionId: 's2', fromWindowId: 'w2', toWindowId: 'main' }),
+			]);
+		});
+
+		it('returns an empty move list (with the primary id) when the window owns nothing', () => {
+			registry.create({ windowId: 'main', isMain: true, browserWindow: makeWindow() });
+			registry.create({ windowId: 'w2', sessionIds: [], browserWindow: makeWindow() });
+
+			expect(registry.reclaimSessionsToPrimary('w2')).toEqual({
+				movedSessionIds: [],
+				primaryWindowId: 'main',
+			});
+		});
+
+		it('returns null for an unknown window', () => {
+			registry.create({ windowId: 'main', isMain: true, browserWindow: makeWindow() });
+			expect(registry.reclaimSessionsToPrimary('ghost')).toBeNull();
+		});
+
+		it('returns null when asked to reclaim the primary itself', () => {
+			registry.create({
+				windowId: 'main',
+				isMain: true,
+				sessionIds: ['m1'],
+				browserWindow: makeWindow(),
+			});
+			expect(registry.reclaimSessionsToPrimary('main')).toBeNull();
+			expect(registry.get('main')?.sessionIds).toEqual(['m1']);
+		});
+
+		it('returns null when no primary is registered', () => {
+			registry.create({ windowId: 'w2', sessionIds: ['s1'], browserWindow: makeWindow() });
+			expect(registry.reclaimSessionsToPrimary('w2')).toBeNull();
+			expect(registry.get('w2')?.sessionIds).toEqual(['s1']);
+		});
+
+		it('does not duplicate a session the primary already owns', () => {
+			registry.create({
+				windowId: 'main',
+				isMain: true,
+				sessionIds: ['s1'],
+				browserWindow: makeWindow(),
+			});
+			registry.create({ windowId: 'w2', sessionIds: ['s1', 's2'], browserWindow: makeWindow() });
+
+			registry.reclaimSessionsToPrimary('w2');
+
+			expect(registry.get('main')?.sessionIds).toEqual(['s1', 's2']);
+			expect(registry.get('w2')?.sessionIds).toEqual([]);
+		});
+	});
+
 	describe('findWindowAtPoint', () => {
 		it('returns the window whose bounds contain the point', () => {
 			registry.create({

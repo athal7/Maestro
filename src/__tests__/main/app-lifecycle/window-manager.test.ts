@@ -1581,7 +1581,18 @@ describe('app-lifecycle/window-manager', () => {
 				get: vi.fn(),
 				getAll: vi.fn(() => []),
 				getPrimary: vi.fn(),
+				reclaimSessionsToPrimary: vi.fn(),
 			};
+		}
+
+		/** A fake primary window whose webContents records `remote:notifyToast` sends. */
+		function makePrimaryWithSend() {
+			const send = vi.fn();
+			const browserWindow = {
+				isDestroyed: () => false,
+				webContents: { isDestroyed: () => false, send },
+			};
+			return { send, browserWindow };
 		}
 
 		async function makeManager(overrides: Partial<Deps> = {}) {
@@ -1730,6 +1741,94 @@ describe('app-lifecycle/window-manager', () => {
 			lastClosedHandler()?.();
 
 			expect(registry.remove).not.toHaveBeenCalled();
+			// No ownership reclaim either - the registry dies with the process.
+			expect(registry.reclaimSessionsToPrimary).not.toHaveBeenCalled();
+		});
+
+		it('reclaims a closing secondary window agents into the primary BEFORE removing it', async () => {
+			const registry = makeRegistry();
+			registry.reclaimSessionsToPrimary.mockReturnValue({
+				movedSessionIds: ['agent-1'],
+				primaryWindowId: 'main',
+			});
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			windowManager.createSecondaryWindow(['agent-1']);
+			const createArg = registry.create.mock.calls[0][0] as { windowId: string };
+
+			lastClosedHandler()?.();
+
+			// Reclaim runs against the still-registered window, THEN it is removed -
+			// so no agent is ever orphaned.
+			expect(registry.reclaimSessionsToPrimary).toHaveBeenCalledWith(createArg.windowId);
+			expect(registry.remove).toHaveBeenCalledWith(createArg.windowId);
+			const reclaimOrder = registry.reclaimSessionsToPrimary.mock.invocationCallOrder[0];
+			const removeOrder = registry.remove.mock.invocationCallOrder[0];
+			expect(reclaimOrder).toBeLessThan(removeOrder);
+		});
+
+		it('toasts the primary window when a closing secondary window had agents reclaimed', async () => {
+			const registry = makeRegistry();
+			const primary = makePrimaryWithSend();
+			registry.reclaimSessionsToPrimary.mockReturnValue({
+				movedSessionIds: ['agent-1', 'agent-2'],
+				primaryWindowId: 'main',
+			});
+			registry.getPrimary.mockReturnValue(primary as never);
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			windowManager.createSecondaryWindow(['agent-1', 'agent-2']);
+			lastClosedHandler()?.();
+
+			expect(primary.send).toHaveBeenCalledWith(
+				'remote:notifyToast',
+				expect.objectContaining({ message: '2 agents moved to main window' })
+			);
+		});
+
+		it('uses the singular noun when exactly one agent is reclaimed', async () => {
+			const registry = makeRegistry();
+			const primary = makePrimaryWithSend();
+			registry.reclaimSessionsToPrimary.mockReturnValue({
+				movedSessionIds: ['agent-1'],
+				primaryWindowId: 'main',
+			});
+			registry.getPrimary.mockReturnValue(primary as never);
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			windowManager.createSecondaryWindow(['agent-1']);
+			lastClosedHandler()?.();
+
+			expect(primary.send).toHaveBeenCalledWith(
+				'remote:notifyToast',
+				expect.objectContaining({ message: '1 agent moved to main window' })
+			);
+		});
+
+		it('does not toast when the closing secondary window owned no agents', async () => {
+			const registry = makeRegistry();
+			const primary = makePrimaryWithSend();
+			registry.reclaimSessionsToPrimary.mockReturnValue({
+				movedSessionIds: [],
+				primaryWindowId: 'main',
+			});
+			registry.getPrimary.mockReturnValue(primary as never);
+			const windowManager = await makeManager({
+				windowRegistry: registry as unknown as Deps['windowRegistry'],
+			});
+
+			windowManager.createSecondaryWindow([]);
+			lastClosedHandler()?.();
+
+			// The window is still removed, but there is nothing to announce.
+			expect(registry.remove).toHaveBeenCalled();
+			expect(primary.send).not.toHaveBeenCalled();
 		});
 
 		it('does not initialize the auto-updater for secondary windows', async () => {
