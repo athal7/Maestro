@@ -94,6 +94,14 @@ export interface WindowContextValue {
 	closeTab: (sessionId: string) => void;
 	/** Detach an agent into a brand-new window, leaving this one. */
 	moveSessionToNewWindow: (sessionId: string) => Promise<void>;
+	/**
+	 * Dock an agent into an EXISTING window (the tab drag-out drop target),
+	 * leaving this one. The destination surfaces the agent in its tab bar and
+	 * activates it via the `windows:sessionMoved` broadcast; this just transfers
+	 * registry ownership and drops the agent from this window's scope. No-op when
+	 * the target is this window or this window has no id yet.
+	 */
+	moveSessionToWindow: (sessionId: string, targetWindowId: string) => Promise<void>;
 }
 
 const WindowContext = createContext<WindowContextValue | null>(null);
@@ -259,6 +267,19 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 		[windowId]
 	);
 
+	const moveSessionToWindow = useCallback(
+		async (sessionId: string, targetWindowId: string) => {
+			// No identity yet, or a "move" onto this same window: nothing to do.
+			if (!windowId || targetWindowId === windowId) return;
+			const result = await window.maestro.windows.moveSession(sessionId, windowId, targetWindowId);
+			// Only drop the agent from this window once the registry confirms the move,
+			// so a failed transfer never strands the agent (owned by no window).
+			if (!result?.moved) return;
+			setScope((prev) => removeFromScope(prev, sessionId));
+		},
+		[windowId]
+	);
+
 	const value = useMemo<WindowContextValue>(
 		() => ({
 			windowId,
@@ -270,6 +291,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			openSession,
 			closeTab,
 			moveSessionToNewWindow,
+			moveSessionToWindow,
 		}),
 		[
 			windowId,
@@ -281,6 +303,7 @@ export function WindowProvider({ children }: { children: ReactNode }) {
 			openSession,
 			closeTab,
 			moveSessionToNewWindow,
+			moveSessionToWindow,
 		]
 	);
 

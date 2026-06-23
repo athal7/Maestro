@@ -287,6 +287,68 @@ describe('WindowContext', () => {
 		});
 	});
 
+	describe('moveSessionToWindow', () => {
+		it('docks the agent into an existing window and drops it locally', async () => {
+			setUrl('/?windowId=win-1');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-1', sessionIds: ['a', 'b'], activeSessionId: 'a' })
+			);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.windowId).toBe('win-1'));
+
+			await act(async () => {
+				await result.current.moveSessionToWindow('a', 'win-2');
+			});
+
+			expect(windows().moveSession).toHaveBeenCalledWith('a', 'win-1', 'win-2');
+			expect(result.current.sessionIds).toEqual(['b']);
+			// 'a' was active and left, so focus moves to the surviving neighbour.
+			expect(result.current.activeSessionId).toBe('b');
+		});
+
+		it('does nothing when the move is onto this same window', async () => {
+			setUrl('/?windowId=win-1');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-1', sessionIds: ['a', 'b'], activeSessionId: 'a' })
+			);
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.windowId).toBe('win-1'));
+
+			await act(async () => {
+				await result.current.moveSessionToWindow('a', 'win-1');
+			});
+
+			expect(windows().moveSession).not.toHaveBeenCalled();
+			expect(result.current.sessionIds).toEqual(['a', 'b']);
+			expect(result.current.activeSessionId).toBe('a');
+		});
+
+		it('keeps the agent locally when the registry reports the move failed', async () => {
+			setUrl('/?windowId=win-1');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'win-1', sessionIds: ['a', 'b'], activeSessionId: 'a' })
+			);
+			vi.mocked(windows().moveSession).mockResolvedValue({
+				moved: false,
+				error: 'Unknown source or destination window',
+			});
+
+			const { result } = renderHook(() => useWindowContext(), { wrapper });
+			await waitFor(() => expect(result.current.windowId).toBe('win-1'));
+
+			await act(async () => {
+				await result.current.moveSessionToWindow('a', 'win-2');
+			});
+
+			expect(windows().moveSession).toHaveBeenCalledWith('a', 'win-1', 'win-2');
+			// Move rejected: the agent stays put rather than being stranded.
+			expect(result.current.sessionIds).toEqual(['a', 'b']);
+			expect(result.current.activeSessionId).toBe('a');
+		});
+	});
+
 	describe('callback stability', () => {
 		it('keeps action callbacks stable across re-renders', async () => {
 			setUrl('/?windowId=win-1');

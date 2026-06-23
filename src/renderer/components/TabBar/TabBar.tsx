@@ -13,7 +13,7 @@ import { SearchPopover } from './SearchPopover';
 import { isUnifiedTabActive, getShortcutHint } from './tabBarUtils';
 import { buildFileTabDisplayNames } from '../../hooks/tabs/internal/filePreviewTabHelpers';
 import { useTabDragOut } from '../../hooks/tabs/useTabDragOut';
-import { useWindowOwnsSession } from '../../contexts/WindowContext';
+import { useWindowOwnsSession, useWindowContextOptional } from '../../contexts/WindowContext';
 import type { TabBarProps } from './types';
 import { logger } from '../../utils/logger';
 
@@ -119,11 +119,18 @@ function TabBarInner({
 	// sessionId, this resolves to true - single-window behaviour is unchanged.
 	const ownsActiveAgent = useWindowOwnsSession(sessionId);
 
+	// The owning window's move action (null outside a WindowProvider, e.g. the
+	// single-window app / isolation tests). Used to dock a dragged-out agent into
+	// another Maestro window on drop.
+	const windowCtx = useWindowContextOptional();
+
 	// Drag-out detection (Phase 3 multi-window): tracks a tab drag in screen
 	// coordinates and flips `isDraggingOut` once the cursor leaves this window's
-	// bounds. In-bar reordering is unaffected - it runs on onDragOver/onDrop
-	// against sibling tabs and never consults this state.
-	const { isDraggingOut, beginDragOut, trackDragOut, endDragOut } = useTabDragOut();
+	// bounds, resolving which other Maestro window (if any) sits under the cursor.
+	// In-bar reordering is unaffected - it runs on onDragOver/onDrop against
+	// sibling tabs and never consults this state.
+	const { isDraggingOut, beginDragOut, trackDragOut, getTargetWindowId, endDragOut } =
+		useTabDragOut();
 
 	// Scroll active tab into view
 	useEffect(() => {
@@ -256,10 +263,19 @@ function TabBarInner({
 	);
 
 	const handleDragEnd = useCallback(() => {
+		// Cross-window drop: a tab dragged out of this window and released over
+		// another Maestro window docks the agent there. The drag-out hook resolved
+		// the window under the cursor as samples arrived; read it now (it is null
+		// over empty space or inside this window). Dropping on empty space to spawn
+		// a NEW window is a later Phase 3 task, so a null target is a no-op here.
+		const targetWindowId = getTargetWindowId();
+		if (targetWindowId && sessionId && windowCtx) {
+			void windowCtx.moveSessionToWindow(sessionId, targetWindowId);
+		}
 		setDraggingTabId(null);
 		setDragOverTabId(null);
 		endDragOut();
-	}, [endDragOut]);
+	}, [getTargetWindowId, sessionId, windowCtx, endDragOut]);
 
 	const handleDrop = useCallback(
 		(targetTabId: string, e: React.DragEvent) => {
