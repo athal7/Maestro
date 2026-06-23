@@ -381,6 +381,15 @@ function TabBarInner({
 		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder]
 	);
 
+	// "Move to New Window" (right-click action): detach this agent into a brand-new
+	// window via the WindowContext helper - the same path the tab drag-out-to-empty-
+	// space gesture uses, minus a drop point (the main process picks the position).
+	// Operates on the whole agent (sessionId), so the per-tab id is unused. Only
+	// wired when a WindowProvider is present (the AITab hides the item otherwise).
+	const handleMoveToNewWindow = useCallback(() => {
+		if (sessionId && windowCtx) void windowCtx.moveSessionToNewWindow(sessionId);
+	}, [sessionId, windowCtx]);
+
 	// Close wrappers — forward the clicked tab id as the pivot so the operation
 	// closes relative to the tab whose menu was used, not whatever happens to be
 	// the active tab. Dropping the id here was the cause of catastrophic
@@ -484,6 +493,10 @@ function TabBarInner({
 			!isLastTab && (useUnifiedReorder ? onUnifiedTabReorder : onTabReorder)
 				? handleMoveToLast
 				: undefined,
+		// Detach-to-new-window is available whenever this window owns the agent (a
+		// WindowProvider is mounted and we have a session id). Hidden in the single-
+		// window app fallback / isolation tests where no provider exists.
+		onMoveToNewWindow: windowCtx && sessionId ? handleMoveToNewWindow : undefined,
 		isFirstTab,
 		isLastTab,
 		shortcutHint,

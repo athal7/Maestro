@@ -299,6 +299,66 @@ describe('TabBar - window scoping', () => {
 		});
 	});
 
+	// The right-click "Move to New Window" overlay action detaches the agent into a
+	// brand-new window through the real WindowContext helper - the same create ->
+	// moveSession path the drag-out-to-empty-space gesture uses, but without a drop
+	// point (the main process positions the window). The overlay opens after the
+	// 400ms hover delay, so the menu item is awaited with a generous timeout.
+	describe('right-click "Move to New Window"', () => {
+		it('detaches the agent into a new window via the overlay menu', async () => {
+			setUrl('/');
+			vi.mocked(windows().getState).mockResolvedValue(
+				makeState({ id: 'primary-1', sessionIds: ['agent-A'], activeSessionId: 'agent-A' })
+			);
+			vi.mocked(windows().list).mockResolvedValue([
+				makeInfo({ id: 'primary-1', isMain: true, sessionIds: ['agent-A'] }),
+			]);
+			vi.mocked(windows().create).mockResolvedValue(
+				makeInfo({ id: 'win-new', sessionIds: ['agent-A'] })
+			);
+
+			renderInWindow('agent-A');
+			const tab = (await screen.findByText('My Tab')).closest('[data-tab-id]')!;
+			// Provider must adopt the registry id before the move can transfer ownership.
+			await waitFor(() => expect(windows().list).toHaveBeenCalled());
+
+			// Hover to open the tab overlay menu (400ms open delay).
+			fireEvent.mouseEnter(tab);
+			const item = await screen.findByText('Move to New Window', {}, { timeout: 1500 });
+			fireEvent.click(item);
+
+			// Spawns a new window for the agent (no bounds -> main process positions it)
+			// and transfers ownership out of the source window.
+			await waitFor(() => expect(windows().create).toHaveBeenCalledWith(['agent-A'], undefined));
+			await waitFor(() =>
+				expect(windows().moveSession).toHaveBeenCalledWith('agent-A', 'primary-1', 'win-new')
+			);
+		});
+
+		it('omits the item in the single-window fallback (no WindowProvider)', async () => {
+			// Rendered standalone (no provider): the agent tab has a session so its
+			// overlay opens, but with no window context the detach action is gated out.
+			render(
+				<TabBar
+					tabs={[{ ...createTab(), agentSessionId: 'sess-1' }]}
+					activeTabId="tab-1"
+					theme={mockTheme}
+					sessionId="agent-A"
+					onTabSelect={vi.fn()}
+					onTabClose={vi.fn()}
+					onNewTab={vi.fn()}
+				/>
+			);
+			const tab = (await screen.findByText('My Tab')).closest('[data-tab-id]')!;
+
+			fireEvent.mouseEnter(tab);
+			// The overlay opens (session present) - wait for a stable item, then assert
+			// "Move to New Window" is absent.
+			await screen.findByText('Rename Tab', {}, { timeout: 1500 });
+			expect(screen.queryByText('Move to New Window')).not.toBeInTheDocument();
+		});
+	});
+
 	// The receiving side of the cross-window feedback: when the main process pushes
 	// a highlightDropZone toggle for THIS window (a tab from elsewhere is hovering
 	// it), the tab strip lights up via the `data-drop-target` attribute and clears

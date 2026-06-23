@@ -63,6 +63,13 @@ export interface AITabProps {
 	onMoveToFirst?: (tabId: string) => void;
 	/** Stable callback - receives tabId */
 	onMoveToLast?: (tabId: string) => void;
+	/**
+	 * Stable callback - detach this agent into a brand-new window. Receives tabId
+	 * for signature parity with the other move actions, though the move operates on
+	 * the whole agent (session), not a single tab. Undefined hides the menu item
+	 * (no multi-window context).
+	 */
+	onMoveToNewWindow?: (tabId: string) => void;
 	/** Is this the first tab? */
 	isFirstTab?: boolean;
 	/** Is this the last tab? */
@@ -123,6 +130,7 @@ export const AITab = memo(function AITab({
 	onPublishGist,
 	onMoveToFirst,
 	onMoveToLast,
+	onMoveToNewWindow,
 	isFirstTab,
 	isLastTab,
 	shortcutHint,
@@ -163,7 +171,9 @@ export const AITab = memo(function AITab({
 			// Only show overlay if there's something meaningful to show:
 			// - Tabs with sessions or logs: always show (for session/context actions)
 			// - Tabs without sessions or logs: show if there are move actions available
-			if (!tab.agentSessionId && !tab.logs?.length && isFirstTab && isLastTab) return false;
+			//   (reorder to first/last, or detach the agent to a new window)
+			if (!tab.agentSessionId && !tab.logs?.length && isFirstTab && isLastTab && !onMoveToNewWindow)
+				return false;
 			return true;
 		},
 	});
@@ -285,6 +295,15 @@ export const AITab = memo(function AITab({
 			setOverlayOpen(false);
 		},
 		[onMoveToLast, tabId, setOverlayOpen]
+	);
+
+	const handleMoveToNewWindowClick = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			onMoveToNewWindow?.(tabId);
+			setOverlayOpen(false);
+		},
+		[onMoveToNewWindow, tabId, setOverlayOpen]
 	);
 
 	const handleCopyContextClick = useCallback(
@@ -618,6 +637,7 @@ export const AITab = memo(function AITab({
 							onPublishGistClick={handlePublishGistClick}
 							onMoveToFirstClick={handleMoveToFirstClick}
 							onMoveToLastClick={handleMoveToLastClick}
+							onMoveToNewWindowClick={handleMoveToNewWindowClick}
 							onCloseTabClick={handleCloseTabClick}
 							onCloseOtherTabsClick={handleCloseOtherTabsClick}
 							onCloseTabsLeftClick={handleCloseTabsLeftClick}
@@ -630,6 +650,7 @@ export const AITab = memo(function AITab({
 							onPublishGist={onPublishGist}
 							onMoveToFirst={onMoveToFirst}
 							onMoveToLast={onMoveToLast}
+							onMoveToNewWindow={onMoveToNewWindow}
 							onCloseOtherTabs={onCloseOtherTabs}
 							onCloseTabsLeft={onCloseTabsLeft}
 							onCloseTabsRight={onCloseTabsRight}
