@@ -95,7 +95,7 @@ import {
 	cleanupAllGroomingSessions,
 	getActiveGroomingSessionCount,
 } from './ipc/handlers';
-import { initializeStatsDB, closeStatsDB, getStatsDB } from './stats';
+import { initializeStatsDB, closeStatsDB, getStatsDB, wireMultiWindowTelemetry } from './stats';
 import { groupChatEmitters } from './ipc/handlers/groupChat';
 import {
 	routeModeratorResponse,
@@ -1556,6 +1556,12 @@ function setupIpcHandlers() {
 	// cross-window badges). The registry is a module-scope instance, so pass it
 	// directly rather than through the handlers' lazy getter.
 	wireWindowRegistryBroadcast(windowRegistry);
+
+	// Record aggregate multi-window usage telemetry (secondary windows opened +
+	// peak concurrent windows) as windows open. Gated on the user's
+	// `statsCollectionEnabled` analytics setting; records nothing when off, and a
+	// stats failure can never break window creation (see wireMultiWindowTelemetry).
+	wireMultiWindowTelemetry(windowRegistry, { settingsStore: store });
 
 	// Register Context Merge handlers for session context transfer and grooming
 	registerContextHandlers({
