@@ -166,6 +166,81 @@ describe('WindowRegistry', () => {
 			registry.moveSession('s1', 'w1', 'ghost');
 			expect(registry.get('w1')?.sessionIds).toEqual(['s1', 's2']);
 		});
+
+		it('strips the session from every window, not just the named source', () => {
+			// s1 has somehow ended up in both w1 and w2 (e.g. a prior stale move).
+			registry.setSessionsForWindow('w2', ['s1']);
+			registry.create({ windowId: 'w3', sessionIds: [], browserWindow: makeWindow() });
+
+			registry.moveSession('s1', 'w1', 'w3');
+
+			expect(registry.get('w1')?.sessionIds).toEqual(['s2']);
+			expect(registry.get('w2')?.sessionIds).toEqual([]);
+			expect(registry.get('w3')?.sessionIds).toEqual(['s1']);
+			expect(registry.getWindowForSession('s1')).toBe('w3');
+		});
+	});
+
+	describe('moveSession race conditions', () => {
+		beforeEach(() => {
+			registry.create({ windowId: 'w1', sessionIds: ['s1'], browserWindow: makeWindow() });
+			registry.create({ windowId: 'w2', sessionIds: [], browserWindow: makeWindow() });
+			registry.create({ windowId: 'w3', sessionIds: [], browserWindow: makeWindow() });
+		});
+
+		/** Assert every session is owned by exactly one window (no dups, no orphans). */
+		function expectSingleOwnership(sessionIds: string[]): void {
+			for (const sessionId of sessionIds) {
+				const owners = registry
+					.getAll()
+					.filter((w) => w.sessionIds.includes(sessionId))
+					.map((w) => w.id);
+				expect(owners).toHaveLength(1);
+			}
+		}
+
+		it('keeps a consistent ownership map when overlapping moves use a stale source', () => {
+			// The first move relocates s1 to w2. The second move fires with the now-stale
+			// fromWindowId 'w1' (the renderer captured it before the first move landed)
+			// and aims at w3. A naive implementation would leave s1 owned by BOTH w2 and w3.
+			registry.moveSession('s1', 'w1', 'w2');
+			registry.moveSession('s1', 'w1', 'w3');
+
+			expectSingleOwnership(['s1']);
+			expect(registry.getWindowForSession('s1')).toBe('w3');
+			expect(registry.get('w2')?.sessionIds).toEqual([]);
+		});
+
+		it('converges to a single owner under many overlapping moves of the same agent', () => {
+			const targets = ['w2', 'w3', 'w1', 'w3', 'w2', 'w1', 'w3'];
+			// Every move claims 'w1' as the source - all but the first are stale.
+			for (const target of targets) {
+				registry.moveSession('s1', 'w1', target);
+			}
+
+			expectSingleOwnership(['s1']);
+			// The last move wins.
+			expect(registry.getWindowForSession('s1')).toBe('w3');
+		});
+
+		it('serializes a re-entrant move triggered from a session-moved listener', () => {
+			// A listener reacts to the first move by immediately moving s1 onward. The
+			// queue must apply that nested move after the current one fully settles, so
+			// the map never interleaves and the final ownership is consistent.
+			let reentered = false;
+			registry.onChange((change) => {
+				if (change.type === 'session-moved' && change.toWindowId === 'w2' && !reentered) {
+					reentered = true;
+					registry.moveSession('s1', 'w2', 'w3');
+				}
+			});
+
+			registry.moveSession('s1', 'w1', 'w2');
+
+			expectSingleOwnership(['s1']);
+			expect(registry.getWindowForSession('s1')).toBe('w3');
+			expect(registry.get('w2')?.sessionIds).toEqual([]);
+		});
 	});
 
 	describe('reclaimSessionsToPrimary', () => {

@@ -41,6 +41,13 @@ export interface WindowRegistryChange {
 	toWindowId?: string;
 }
 
+/** A single move request awaiting application in {@link WindowRegistry.moveSession}. */
+interface QueuedMove {
+	sessionId: string;
+	fromWindowId: string;
+	toWindowId: string;
+}
+
 /**
  * WindowRegistry is the single source of truth for window<->session ownership.
  *
@@ -53,6 +60,19 @@ export interface WindowRegistryChange {
  */
 export class WindowRegistry extends EventEmitter {
 	private readonly windows = new Map<string, RegisteredWindow>();
+
+	/**
+	 * Pending session moves, drained FIFO by {@link drainMoveQueue}. A move is
+	 * always enqueued and drained synchronously, but routing through the queue
+	 * serializes the mutations: if applying one move emits a `session-moved`
+	 * change whose listener (synchronously) requests another move, that nested
+	 * move is queued and applied only after the current one has fully settled,
+	 * never interleaving into the ownership map mid-mutation.
+	 */
+	private readonly moveQueue: QueuedMove[] = [];
+
+	/** True while {@link drainMoveQueue} is applying moves (re-entrancy guard). */
+	private drainingMoves = false;
 
 	/**
 	 * Register a window. The `BrowserWindow` itself is built by
@@ -138,18 +158,49 @@ export class WindowRegistry extends EventEmitter {
 	}
 
 	/**
-	 * Move a session from one window to another. Removes it from the source
-	 * window (if present) and appends it to the destination (avoiding
-	 * duplicates). No-op if either window is unknown.
+	 * Move a session into another window. Enqueues the move and drains the queue
+	 * synchronously (see {@link moveQueue}); the queue exists only to serialize
+	 * moves so a re-entrant move from a `session-moved` listener cannot mutate the
+	 * ownership map mid-update. No-op if either named window is unknown.
+	 *
+	 * Each applied move enforces the single-ownership invariant: the session is
+	 * stripped from EVERY window before being appended to the destination. This
+	 * keeps rapid, overlapping drags consistent - a second move whose
+	 * `fromWindowId` is stale (the first move already relocated the agent) would,
+	 * if it only stripped the named source, leave the agent owned by two windows.
+	 * Removing it everywhere makes any interleaving converge to exactly one owner.
 	 */
 	moveSession(sessionId: string, fromWindowId: string, toWindowId: string): void {
+		this.moveQueue.push({ sessionId, fromWindowId, toWindowId });
+		this.drainMoveQueue();
+	}
+
+	/** Apply every queued move in order, guarding against re-entrant draining. */
+	private drainMoveQueue(): void {
+		if (this.drainingMoves) return;
+		this.drainingMoves = true;
+		try {
+			let move: QueuedMove | undefined;
+			while ((move = this.moveQueue.shift()) !== undefined) {
+				this.applyMove(move);
+			}
+		} finally {
+			this.drainingMoves = false;
+		}
+	}
+
+	/** Mutate the ownership map for a single move and emit its change signal. */
+	private applyMove({ sessionId, fromWindowId, toWindowId }: QueuedMove): void {
 		const from = this.windows.get(fromWindowId);
 		const to = this.windows.get(toWindowId);
 		if (!from || !to) return;
-		from.sessionIds = from.sessionIds.filter((id) => id !== sessionId);
-		if (!to.sessionIds.includes(sessionId)) {
-			to.sessionIds.push(sessionId);
+		// Single-ownership invariant: drop the session from every window first, so a
+		// stale fromWindowId can never leave it owned by two windows.
+		for (const entry of this.windows.values()) {
+			const idx = entry.sessionIds.indexOf(sessionId);
+			if (idx !== -1) entry.sessionIds.splice(idx, 1);
 		}
+		to.sessionIds.push(sessionId);
 		this.emitChange({
 			type: 'session-moved',
 			sessionId,
