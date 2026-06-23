@@ -307,8 +307,13 @@ export function registerAllHandlers(deps: HandlerDependencies): void {
 		app: deps.app,
 		settingsStore: deps.settingsStore,
 	});
-	// Register notification handlers (OS notifications and TTS)
-	registerNotificationsHandlers({ getMainWindow: deps.getMainWindow });
+	// Register notification handlers (OS notifications and TTS). The window
+	// registry getter lets a notification click focus the window that owns the
+	// completing agent rather than always the primary window (multi-window).
+	registerNotificationsHandlers({
+		getMainWindow: deps.getMainWindow,
+		getWindowRegistry: deps.getWindowRegistry,
+	});
 	// Register Symphony handlers for token donation / open source contributions
 	registerSymphonyHandlers({
 		app: deps.app,
