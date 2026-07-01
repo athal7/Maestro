@@ -11,6 +11,7 @@ import {
 	updateGroupInSession,
 	updateSplitSizes,
 } from '../../utils/panelLayout';
+import { writeTabTilePayload } from '../../utils/tabDragPayload';
 import type { PanelLayoutNode, Session, TabGroup, Theme, UnifiedTabRef } from '../../types';
 
 // Lazy-loaded to match MainPanelContent: FilePreview pulls the full markdown /
@@ -193,10 +194,31 @@ function PaneFrame({
 		updateSessionWith(session.id, (s) => focusPaneInSession(s, group.id, node.id));
 	}, [group.focusedPaneId, group.id, node.id, session.id]);
 
+	// Dragging the title bar carries a `source: 'pane'` tiling payload so a drop
+	// onto the tab bar promotes this pane back to a standalone tab (and text/plain
+	// so the drag has a native fallback). The group + leaf ids let the tab bar's
+	// drop handler target the right group and auto-dissolve it below two panes.
+	const handleTitleDragStart = React.useCallback(
+		(e: React.DragEvent) => {
+			e.dataTransfer.effectAllowed = 'move';
+			e.dataTransfer.setData('text/plain', node.tab.id);
+			writeTabTilePayload(e.dataTransfer, {
+				ref: node.tab,
+				source: 'pane',
+				groupId: group.id,
+				leafId: node.id,
+			});
+		},
+		[group.id, node.id, node.tab]
+	);
+
 	return (
 		<div
 			className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden"
 			onMouseDown={focusThisPane}
+			// Tags this pane's box so the drop-zone overlay can hit-test a tab drag
+			// against it (read via document.querySelectorAll in PaneDropZones).
+			data-pane-leaf-id={node.id}
 			style={{
 				// Accent ring on the focused pane; a plain border otherwise. Same
 				// accent token active/selected states use elsewhere - no hardcoded colors.
@@ -204,15 +226,18 @@ function PaneFrame({
 				boxShadow: isFocused ? `inset 0 0 0 1px ${theme.colors.accent}` : undefined,
 			}}
 		>
-			{/* Title bar - brighter (accent text) when this pane holds focus. */}
+			{/* Title bar - brighter (accent text) when this pane holds focus. Also a
+			    drag handle: drag it to the tab bar to promote this pane out. */}
 			<div
-				className="shrink-0 px-2 py-1 text-xs font-medium truncate select-none"
+				className="shrink-0 px-2 py-1 text-xs font-medium truncate select-none cursor-grab active:cursor-grabbing"
 				style={{
 					backgroundColor: isFocused ? theme.colors.bgActivity : theme.colors.bgSidebar,
 					color: isFocused ? theme.colors.accent : theme.colors.textMain,
 					borderBottom: `1px solid ${isFocused ? theme.colors.accent : theme.colors.border}`,
 				}}
 				title={title}
+				draggable
+				onDragStart={handleTitleDragStart}
 			>
 				{title}
 			</div>

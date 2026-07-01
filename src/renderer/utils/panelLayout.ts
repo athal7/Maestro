@@ -20,6 +20,82 @@ import { generateId } from './ids';
  */
 export const MIN_PANE_FRACTION = 0.05;
 
+/**
+ * Fraction of a pane's width/height that each outer edge band occupies when
+ * hit-testing a drop. The four edge bands (top/bottom/left/right) are the outer
+ * ~25% of the pane; anything inside all four is the center zone. Kept modest so
+ * the center target stays comfortably large for the common "add as sibling" drop.
+ */
+export const DROP_EDGE_BAND = 0.25;
+
+/** A drop target region within a pane's bounding rect. */
+export type DropZone = 'top' | 'bottom' | 'left' | 'right' | 'center';
+
+/** A pane's on-screen box (client pixels), as returned by getBoundingClientRect. */
+export interface DropRect {
+	left: number;
+	top: number;
+	width: number;
+	height: number;
+}
+
+/**
+ * Classify a pointer position within a pane's rect into one of five drop zones.
+ * The outer `DROP_EDGE_BAND` of each side is that edge's band; the inner core is
+ * `center`. When a pointer sits in a corner (inside two edge bands at once), the
+ * band it has penetrated more deeply wins (smaller normalized distance to its
+ * edge), so a drag along a border resolves to the nearer edge rather than
+ * flip-flopping. A degenerate (zero-area) rect resolves to `center`.
+ */
+export function computeDropZone(rect: DropRect, pointerX: number, pointerY: number): DropZone {
+	if (rect.width <= 0 || rect.height <= 0) return 'center';
+	// Normalize the pointer into [0,1] within the rect (clamped, so samples just
+	// outside the box during a fast drag still classify to the nearest edge band).
+	const nx = Math.min(1, Math.max(0, (pointerX - rect.left) / rect.width));
+	const ny = Math.min(1, Math.max(0, (pointerY - rect.top) / rect.height));
+
+	const inLeft = nx < DROP_EDGE_BAND;
+	const inRight = nx > 1 - DROP_EDGE_BAND;
+	const inTop = ny < DROP_EDGE_BAND;
+	const inBottom = ny > 1 - DROP_EDGE_BAND;
+
+	// No edge band: the pointer sits in the inner core.
+	if (!inLeft && !inRight && !inTop && !inBottom) return 'center';
+
+	// Depth into each band the pointer is in (0 at the band's inner boundary, up to
+	// DROP_EDGE_BAND at the pane's outer edge). The deepest band wins on corners.
+	const depths: Array<{ zone: DropZone; depth: number }> = [];
+	if (inLeft) depths.push({ zone: 'left', depth: DROP_EDGE_BAND - nx });
+	if (inRight) depths.push({ zone: 'right', depth: nx - (1 - DROP_EDGE_BAND) });
+	if (inTop) depths.push({ zone: 'top', depth: DROP_EDGE_BAND - ny });
+	if (inBottom) depths.push({ zone: 'bottom', depth: ny - (1 - DROP_EDGE_BAND) });
+
+	return depths.reduce((best, cur) => (cur.depth > best.depth ? cur : best)).zone;
+}
+
+/**
+ * Map a drop zone to the split geometry it implies: the split `direction`
+ * (left/right tile side by side -> `row`; top/bottom stack -> `column`) and
+ * whether the dropped pane lands `before` the target leaf (top/left) or after
+ * (bottom/right). `center` has no edge geometry, so it reports `null`.
+ */
+export function dropZoneToSplit(
+	zone: DropZone
+): { direction: 'row' | 'column'; before: boolean } | null {
+	switch (zone) {
+		case 'left':
+			return { direction: 'row', before: true };
+		case 'right':
+			return { direction: 'row', before: false };
+		case 'top':
+			return { direction: 'column', before: true };
+		case 'bottom':
+			return { direction: 'column', before: false };
+		default:
+			return null;
+	}
+}
+
 /** Compare two tab refs by type + id (leaves reference tabs by value, not identity). */
 function sameTabRef(a: UnifiedTabRef, b: UnifiedTabRef): boolean {
 	return a.type === b.type && a.id === b.id;
@@ -66,6 +142,11 @@ export function createGroupFromTabRefs(tabs: UnifiedTabRef[], name: string): Tab
  * Replace the leaf identified by `leafId` with a split that holds the original
  * leaf plus a new leaf for `newTab`, dividing the space `[0.5, 0.5]`.
  *
+ * `before` controls which side the new leaf lands on: `false` (default) places
+ * it after the target (right/below), `true` places it before (left/above). This
+ * lets an edge-drop honor its direction (a left/top drop inserts before, a
+ * right/bottom drop inserts after).
+ *
  * tmux behavior: when the target leaf's parent split already runs in the
  * requested `direction`, the new leaf is inserted as a sibling in that parent
  * (rebalanced to equal weights) instead of nesting a fresh split - so repeated
@@ -75,7 +156,8 @@ export function splitLeaf(
 	layout: PanelLayoutNode,
 	leafId: string,
 	direction: 'row' | 'column',
-	newTab: UnifiedTabRef
+	newTab: UnifiedTabRef,
+	before = false
 ): PanelLayoutNode {
 	const newLeaf = createLeaf(newTab);
 
@@ -87,7 +169,7 @@ export function splitLeaf(
 					kind: 'split',
 					id: generateId(),
 					direction,
-					children: [node, newLeaf],
+					children: before ? [newLeaf, node] : [node, newLeaf],
 					sizes: [0.5, 0.5],
 				};
 			}
@@ -101,10 +183,11 @@ export function splitLeaf(
 			(child) => child.kind === 'leaf' && child.id === leafId
 		);
 		if (targetIndex !== -1 && node.direction === direction) {
+			const insertAt = before ? targetIndex : targetIndex + 1;
 			const children = [
-				...node.children.slice(0, targetIndex + 1),
+				...node.children.slice(0, insertAt),
 				newLeaf,
-				...node.children.slice(targetIndex + 1),
+				...node.children.slice(insertAt),
 			];
 			const sizes = children.map(() => 1 / children.length);
 			return { ...node, children, sizes };
@@ -445,4 +528,234 @@ export function focusPaneInSession(session: Session, groupId: string, leafId: st
 	if (!group) return withFocus;
 	const aiId = focusedAiTabId(group);
 	return aiId ? { ...withFocus, activeTabId: aiId, inputMode: 'ai' } : withFocus;
+}
+
+/** Stable key for a tab ref (used to dedupe / match refs by value in a Set). */
+function tabRefKey(ref: UnifiedTabRef): string {
+	return `${ref.type}:${ref.id}`;
+}
+
+/** Drop every occurrence of `tab` from `order` (matched by type + id). */
+function removeRefFromOrder(order: UnifiedTabRef[], tab: UnifiedTabRef): UnifiedTabRef[] {
+	return order.filter((ref) => !sameTabRef(ref, tab));
+}
+
+/**
+ * Insert `tab` into `order` at `index` (clamped to the array bounds), first
+ * removing any existing occurrence so a promoted-out pane can't double up in the
+ * strip. A negative or out-of-range index appends.
+ */
+export function insertRefIntoOrder(
+	order: UnifiedTabRef[],
+	tab: UnifiedTabRef,
+	index: number
+): UnifiedTabRef[] {
+	const without = removeRefFromOrder(order, tab);
+	const at = index < 0 || index > without.length ? without.length : index;
+	return [...without.slice(0, at), tab, ...without.slice(at)];
+}
+
+/**
+ * Tile a dragged tab into an existing group by dropping it on one of a target
+ * pane's zones:
+ *
+ * - An EDGE zone (top/bottom/left/right) splits the target leaf in the matching
+ *   direction (left/right -> `row`, top/bottom -> `column`) with the new pane
+ *   placed before (top/left) or after (bottom/right) per the drop side.
+ * - The CENTER zone adds the dragged tab as a sibling of the target using the
+ *   target's parent split direction (falling back to `row` for a single-pane
+ *   group), keeping behavior simple: no stacking/replace.
+ *
+ * The dragged ref is removed from `unifiedTabOrder` (it now lives in the group)
+ * and the freshly inserted pane is focused. A no-op copy when the group or the
+ * target leaf can't be found. All state moves in one returned Session.
+ */
+export function tileTabIntoGroup(
+	session: Session,
+	groupId: string,
+	targetLeafId: string,
+	zone: DropZone,
+	draggedTab: UnifiedTabRef
+): Session {
+	const group = session.tabGroups.find((g) => g.id === groupId);
+	if (!group) return session;
+	const targetLeaf = findLeafById(group.layout, targetLeafId);
+	if (!targetLeaf || targetLeaf.kind !== 'leaf') return session;
+
+	const split = dropZoneToSplit(zone);
+	// Center: add as a sibling along the target's parent split direction.
+	const direction = split ? split.direction : parentSplitDirection(group.layout, targetLeafId);
+	const before = split ? split.before : false;
+
+	const nextLayout = splitLeaf(group.layout, targetLeafId, direction, draggedTab, before);
+	const newLeafId = findNewLeafId(group.layout, nextLayout, draggedTab);
+
+	const withGroup = updateGroupInSession(
+		{ ...session, unifiedTabOrder: removeRefFromOrder(session.unifiedTabOrder, draggedTab) },
+		groupId,
+		(g) => ({ ...g, layout: nextLayout })
+	);
+	return newLeafId ? focusPaneInSession(withGroup, groupId, newLeafId) : withGroup;
+}
+
+/**
+ * Create a brand-new tiled group from two standalone tabs: the drop-target tab
+ * and the dragged tab, arranged per the drop `zone`. Used when a bar tab is
+ * dropped onto the content of another standalone tab (no group active yet).
+ *
+ * The two panes are ordered by the drop side (the dragged pane lands before the
+ * target for a top/left drop, after for bottom/right or center), the split runs
+ * in the zone's direction (center falls back to `row`), both refs are removed
+ * from `unifiedTabOrder`, the group is appended to `tabGroups`, and it becomes
+ * the active group with its focused pane routing input.
+ */
+export function createGroupFromDrop(
+	session: Session,
+	targetRef: UnifiedTabRef,
+	draggedRef: UnifiedTabRef,
+	zone: DropZone,
+	name: string
+): Session {
+	const split = dropZoneToSplit(zone);
+	const direction = split ? split.direction : 'row';
+	// top/left -> dragged before target; bottom/right/center -> dragged after.
+	const ordered = split && split.before ? [draggedRef, targetRef] : [targetRef, draggedRef];
+
+	const group = createGroupFromTabRefs(ordered, name);
+	// createGroupFromTabRefs builds a flat `row` split; honor a column drop.
+	const layout = group.layout.kind === 'split' ? { ...group.layout, direction } : group.layout;
+	const draggedLeaf =
+		layout.kind === 'split'
+			? layout.children.find((c) => c.kind === 'leaf' && sameTabRef(c.tab, draggedRef))
+			: undefined;
+	const finalGroup: TabGroup = {
+		...group,
+		layout,
+		// Focus the dragged pane (the one the user just placed).
+		focusedPaneId: draggedLeaf?.id ?? group.focusedPaneId,
+	};
+
+	const removeKeys = new Set([tabRefKey(targetRef), tabRefKey(draggedRef)]);
+	const withGroup: Session = {
+		...session,
+		unifiedTabOrder: session.unifiedTabOrder.filter((ref) => !removeKeys.has(tabRefKey(ref))),
+		tabGroups: [...session.tabGroups, finalGroup],
+		activeGroupId: finalGroup.id,
+	};
+	return finalGroup.focusedPaneId
+		? focusPaneInSession(withGroup, finalGroup.id, finalGroup.focusedPaneId)
+		: withGroup;
+}
+
+/**
+ * Promote a group's pane back to a standalone tab: remove the leaf from the
+ * group's layout, re-insert its tab ref into `unifiedTabOrder` at `insertIndex`,
+ * and rebalance. When the removal leaves the group with fewer than two panes the
+ * group auto-dissolves (its remaining pane is promoted too, the group is dropped,
+ * and `activeGroupId` clears if it pointed here) via {@link dissolveGroup}. A
+ * no-op copy when the group or the leaf can't be found.
+ */
+export function promotePaneToStandalone(
+	session: Session,
+	groupId: string,
+	leafId: string,
+	insertIndex: number
+): Session {
+	const group = session.tabGroups.find((g) => g.id === groupId);
+	if (!group) return session;
+	const leaf = findLeafById(group.layout, leafId);
+	if (!leaf || leaf.kind !== 'leaf') return session;
+
+	const promotedRef = leaf.tab;
+	const remaining = removeLeafByTabRef(group.layout, promotedRef);
+
+	// Re-add the promoted tab to the strip at the drop position.
+	const withOrder: Session = {
+		...session,
+		unifiedTabOrder: insertRefIntoOrder(session.unifiedTabOrder, promotedRef, insertIndex),
+	};
+
+	// Removal emptied the group (only that pane remained): drop the group and
+	// clear the active pointer. The dissolve helper handles promoting leftovers,
+	// but here there are none to promote beyond the one we just re-added.
+	if (remaining === null) {
+		return {
+			...withOrder,
+			tabGroups: withOrder.tabGroups.filter((g) => g.id !== groupId),
+			activeGroupId: withOrder.activeGroupId === groupId ? null : withOrder.activeGroupId,
+		};
+	}
+
+	const rebalanced = rebalanceLayout(remaining);
+	const withGroup = updateGroupInSession(withOrder, groupId, (g) => ({
+		...g,
+		layout: rebalanced,
+		// Focus a surviving pane if the promoted one held focus.
+		focusedPaneId: g.focusedPaneId === leafId ? firstLeafId(rebalanced) : g.focusedPaneId,
+	}));
+
+	// Below two panes: auto-dissolve, promoting the lone survivor to a standalone
+	// tab and tearing down the group.
+	if (countLeaves(rebalanced) < 2) {
+		return dissolveGroup(withGroup, groupId);
+	}
+	return withGroup;
+}
+
+/** The split direction of the immediate parent of `leafId`, or `row` if none. */
+function parentSplitDirection(node: PanelLayoutNode, leafId: string): 'row' | 'column' {
+	if (node.kind === 'leaf') return 'row';
+	if (node.children.some((c) => c.kind === 'leaf' && c.id === leafId)) return node.direction;
+	for (const child of node.children) {
+		if (child.kind === 'split') {
+			const found = parentSplitDirection(child, leafId);
+			if (findLeafById(child, leafId)) return found;
+		}
+	}
+	return 'row';
+}
+
+/** Id of the first (top-left) leaf in a layout, or null for an empty tree. */
+function firstLeafId(node: PanelLayoutNode): string | null {
+	if (node.kind === 'leaf') return node.id;
+	for (const child of node.children) {
+		const id = firstLeafId(child);
+		if (id) return id;
+	}
+	return null;
+}
+
+/**
+ * Find the id of the leaf added to `next` (vs `prev`) that references `tab`.
+ * `splitLeaf` mints a fresh id for the inserted leaf, so we locate it by the new
+ * leaf-id set diff filtered to leaves referencing the dragged tab. Returns null
+ * if nothing new matched (should not happen after a successful split).
+ */
+function findNewLeafId(
+	prev: PanelLayoutNode,
+	next: PanelLayoutNode,
+	tab: UnifiedTabRef
+): string | null {
+	const prevIds = new Set<string>();
+	collectLeafIds(prev, prevIds);
+	let found: string | null = null;
+	function walk(node: PanelLayoutNode): void {
+		if (found) return;
+		if (node.kind === 'leaf') {
+			if (!prevIds.has(node.id) && sameTabRef(node.tab, tab)) found = node.id;
+			return;
+		}
+		node.children.forEach(walk);
+	}
+	walk(next);
+	return found;
+}
+
+/** Collect every leaf node id in the tree into `out`. */
+function collectLeafIds(node: PanelLayoutNode, out: Set<string>): void {
+	if (node.kind === 'leaf') {
+		out.add(node.id);
+		return;
+	}
+	node.children.forEach((child) => collectLeafIds(child, out));
 }

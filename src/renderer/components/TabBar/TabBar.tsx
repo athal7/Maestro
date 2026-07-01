@@ -1,9 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect, memo, useMemo } from 'react';
 import { Bell, LayoutGrid } from 'lucide-react';
-import type { AITab, TabGroup, UnifiedTabRef } from '../../types';
-import { hasDraft, getTabDisplayName } from '../../utils/tabHelpers';
+import type { AITab, UnifiedTabRef } from '../../types';
+import { hasDraft } from '../../utils/tabHelpers';
 import { updateSessionWith } from '../../stores/sessionStore';
-import { createGroupFromTabRefs, generateGroupName } from '../../utils/panelLayout';
+import { promotePaneToStandalone } from '../../utils/panelLayout';
+import {
+	writeTabTilePayload,
+	readTabTilePayload,
+	dragHasTabTilePayload,
+} from '../../utils/tabDragPayload';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { AITab as AITabComponent } from './AITab';
@@ -260,14 +265,27 @@ function TabBarInner({
 	const handleDragStart = useCallback(
 		(tabId: string, e: React.DragEvent) => {
 			e.dataTransfer.effectAllowed = 'move';
+			// text/plain (the tab id) drives BOTH the in-bar reorder (onDrop against a
+			// sibling chip) and the multi-window drag-out/dock gesture. Untouched here.
 			e.dataTransfer.setData('text/plain', tabId);
+			// ADD (never replace) the tiling payload so a drop onto the tiled panel can
+			// identify this tab. Resolve the tab's type from the unified list (legacy
+			// mode is AI-only). Group chips aren't draggable, so this is a leaf tab.
+			const unifiedType = unifiedTabs?.find((ut) => ut.id === tabId)?.type;
+			const ref: UnifiedTabRef | null =
+				unifiedType && unifiedType !== 'group'
+					? { type: unifiedType, id: tabId }
+					: unifiedTabs
+						? null
+						: { type: 'ai', id: tabId };
+			if (ref) writeTabTilePayload(e.dataTransfer, { ref, source: 'tab-bar' });
 			setDraggingTabId(tabId);
 			// Snapshot this window's bounds so onDrag can detect when the cursor
 			// leaves it. Harmless for non-AI tabs (which don't wire onDrag): the
 			// snapshot is just never consulted.
 			beginDragOut();
 		},
-		[beginDragOut]
+		[beginDragOut, unifiedTabs]
 	);
 
 	const handleDragOver = useCallback(
@@ -318,9 +336,38 @@ function TabBarInner({
 		endDragOut();
 	}, [getTargetWindowId, isOutsideOwningWindow, getDragOutPoint, sessionId, windowCtx, endDragOut]);
 
+	// Promote a tiled pane back to a standalone tab when its title bar is dropped
+	// onto the tab bar. `insertIndex` is the target position in unifiedTabOrder
+	// (append when null). Reuses the pure promote helper (removes the leaf, re-adds
+	// the ref, auto-dissolves the group below two panes). No-op when the payload is
+	// not a pane drag or lacks the group/leaf ids.
+	const promotePaneFromDrag = useCallback(
+		(e: React.DragEvent, insertIndex: number | null): boolean => {
+			const payload = readTabTilePayload(e.dataTransfer);
+			if (!payload || payload.source !== 'pane' || !payload.groupId || !payload.leafId) {
+				return false;
+			}
+			if (!sessionId) return false;
+			const groupId = payload.groupId;
+			const leafId = payload.leafId;
+			updateSessionWith(sessionId, (s) =>
+				promotePaneToStandalone(s, groupId, leafId, insertIndex ?? s.unifiedTabOrder.length)
+			);
+			return true;
+		},
+		[sessionId]
+	);
+
 	const handleDrop = useCallback(
 		(targetTabId: string, e: React.DragEvent) => {
 			e.preventDefault();
+			// A tiled pane dropped onto a chip promotes out at that chip's position.
+			const targetIndex = (unifiedTabs ?? []).findIndex((ut) => ut.id === targetTabId);
+			if (promotePaneFromDrag(e, targetIndex === -1 ? null : targetIndex)) {
+				setDraggingTabId(null);
+				setDragOverTabId(null);
+				return;
+			}
 			const sourceTabId = e.dataTransfer.getData('text/plain');
 			if (sourceTabId && sourceTabId !== targetTabId) {
 				if (unifiedTabs && onUnifiedTabReorder) {
@@ -336,7 +383,31 @@ function TabBarInner({
 			setDraggingTabId(null);
 			setDragOverTabId(null);
 		},
-		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder]
+		[tabs, onTabReorder, unifiedTabs, onUnifiedTabReorder, promotePaneFromDrag]
+	);
+
+	// Drop onto the empty area of the tab bar (not a chip): only reacts to a pane
+	// promote-out (appended to the end of the strip). A plain tab-chip reorder or a
+	// multi-window drag-out is unaffected - those never target the bar background.
+	const handleBarDragOver = useCallback((e: React.DragEvent) => {
+		if (dragHasTabTilePayload(e.dataTransfer)) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = 'move';
+		}
+	}, []);
+
+	const handleBarDrop = useCallback(
+		(e: React.DragEvent) => {
+			// Only handle drops that land on the bar background, not bubbling from a
+			// chip (chips call handleDrop and stop there).
+			if (e.defaultPrevented) return;
+			if (promotePaneFromDrag(e, null)) {
+				e.preventDefault();
+				setDraggingTabId(null);
+				setDragOverTabId(null);
+			}
+		},
+		[promotePaneFromDrag]
 	);
 
 	const handleRenameRequest = useCallback(
@@ -520,6 +591,11 @@ function TabBarInner({
 			ref={tabBarRef}
 			className="flex items-end gap-0.5 pt-2 border-b overflow-x-auto overflow-y-hidden no-scrollbar transition-shadow duration-150"
 			data-tour="tab-bar"
+			// Accept a tiled pane's title-bar drag dropped onto the bar background to
+			// promote it back to a standalone tab. Chip reorder + multi-window drag-out
+			// are unaffected (they target chips / empty space outside the window).
+			onDragOver={handleBarDragOver}
+			onDrop={handleBarDrop}
 			// Surfaces drag-out detection: 'true' while a tab is being dragged beyond
 			// this window's bounds. Drives the cross-window move / detach feedback.
 			data-dragging-out={isDraggingOut ? 'true' : undefined}
@@ -826,89 +902,6 @@ function TabBarInner({
 				terminalKeys={shortcuts.toggleMode?.keys ?? ['Meta', 'j']}
 				isOverflowing={isOverflowing}
 			/>
-
-			{/* TEMPORARY SCAFFOLDING (remove when drag-and-drop tiling lands): a
-			    "Tile open tabs" button that groups the currently-open standalone AI and
-			    file-preview tabs into one tiled TabGroup so the prototype is demonstrable
-			    without DnD. Guarded to require at least 2 eligible tabs. */}
-			{ownsActiveAgent && sessionId && (
-				<TileOpenTabsButton
-					theme={theme}
-					sessionId={sessionId}
-					unifiedTabs={unifiedTabs}
-					onGroupSelect={onGroupSelect}
-				/>
-			)}
-		</div>
-	);
-}
-
-/**
- * TEMPORARY SCAFFOLDING - delete when drag-and-drop tiling ships.
- *
- * Collects the standalone AI and file-preview tab refs from the unified order,
- * builds a TabGroup via createGroupFromTabRefs, removes those refs from
- * unifiedTabOrder (so they stop showing as standalone chips), pushes the group
- * onto session.tabGroups, and activates it - all in one updateSessionWith call.
- * Requires at least 2 eligible tabs.
- */
-function TileOpenTabsButton({
-	theme,
-	sessionId,
-	unifiedTabs,
-	onGroupSelect,
-}: {
-	theme: import('../../types').Theme;
-	sessionId: string;
-	unifiedTabs?: import('../../types').UnifiedTab[];
-	onGroupSelect?: (groupId: string) => void;
-}) {
-	// Only AI and file-preview tabs are eligible in this phase (terminal/browser
-	// tiling is deferred). Mirror the visual order.
-	const eligibleRefs: UnifiedTabRef[] = (unifiedTabs ?? [])
-		.filter((ut) => ut.type === 'ai' || ut.type === 'file')
-		.map((ut) => ({ type: ut.type, id: ut.id }));
-
-	if (eligibleRefs.length < 2) return null;
-
-	const handleTile = () => {
-		const firstTab = (unifiedTabs ?? []).find(
-			(ut) => ut.type === eligibleRefs[0].type && ut.id === eligibleRefs[0].id
-		);
-		const firstTitle =
-			firstTab?.type === 'ai'
-				? getTabDisplayName(firstTab.data)
-				: firstTab?.type === 'file'
-					? firstTab.data.name
-					: 'Tabs';
-		const group: TabGroup = createGroupFromTabRefs(eligibleRefs, generateGroupName(firstTitle));
-		updateSessionWith(sessionId, (s) => {
-			const eligibleKeys = new Set(eligibleRefs.map((r) => `${r.type}:${r.id}`));
-			return {
-				...s,
-				tabGroups: [...(s.tabGroups ?? []), group],
-				activeGroupId: group.id,
-				unifiedTabOrder: (s.unifiedTabOrder ?? []).filter(
-					(ref) => !eligibleKeys.has(`${ref.type}:${ref.id}`)
-				),
-			};
-		});
-		onGroupSelect?.(group.id);
-	};
-
-	return (
-		<div
-			className="flex items-center shrink-0 pr-2 self-stretch"
-			style={{ backgroundColor: theme.colors.bgSidebar, zIndex: 5 }}
-		>
-			<button
-				onClick={handleTile}
-				className="flex items-center justify-center w-6 h-6 rounded hover:bg-white/10 transition-colors"
-				style={{ color: theme.colors.textDim }}
-				title="Tile open tabs (temporary)"
-			>
-				<LayoutGrid className="w-4 h-4" />
-			</button>
 		</div>
 	);
 }

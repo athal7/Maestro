@@ -12,7 +12,9 @@ import type { FilePreviewHandle } from '../FilePreview';
 import { WizardConversationView, DocumentGenerationView } from '../InlineWizard';
 import { BrowserTabView, type BrowserTabViewHandle } from './BrowserTabView';
 import { TiledLayout } from './TiledLayout';
+import { PaneDropZones } from './PaneDropZones';
 import { findLeafById } from '../../utils/panelLayout';
+import { getTabDisplayName } from '../../utils/tabHelpers';
 import { useBrowserTabMounting } from '../../hooks/browser/useBrowserTabMounting';
 import { useUIStore } from '../../stores/uiStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -28,6 +30,7 @@ import type {
 	FilePreviewTab,
 	ThinkingItem,
 	QueuedItem,
+	UnifiedTabRef,
 } from '../../types';
 import type { SlashCommand } from './types';
 import type { TabCompletionSuggestion, TabCompletionFilter } from '../../hooks';
@@ -471,6 +474,28 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 		activeSession.activeGroupId != null
 			? activeSession.tabGroups?.find((g) => g.id === activeSession.activeGroupId)
 			: undefined;
+	// Current single-view tab ref (used only when no group is active): a tab drop
+	// onto the panel then pairs this tab with the dragged one into a new group. The
+	// precedence mirrors the single-view routing below (terminal mode -> terminal;
+	// else file, else browser, else the AI tab). Null when nothing tileable is
+	// showing (an empty agent) so a drop is a no-op.
+	const singleViewRef: UnifiedTabRef | null = React.useMemo(() => {
+		if (activeSession.inputMode === 'terminal' && activeSession.activeTerminalTabId) {
+			return { type: 'terminal', id: activeSession.activeTerminalTabId };
+		}
+		if (activeFileTabId) return { type: 'file', id: activeFileTabId };
+		if (activeBrowserTabId) return { type: 'browser', id: activeBrowserTabId };
+		if (activeTab) return { type: 'ai', id: activeTab.id };
+		return null;
+	}, [
+		activeSession.inputMode,
+		activeSession.activeTerminalTabId,
+		activeFileTabId,
+		activeBrowserTabId,
+		activeTab,
+	]);
+	const singleViewTitle =
+		activeFileTab?.name ?? (activeTab ? getTabDisplayName(activeTab) : 'Tabs');
 	// Transient maximize/zoom (Ctrl+Cmd+Z): id of the pane rendered full-panel.
 	const zoomedPaneId = useUIStore((s) => s.zoomedPaneId);
 	// When a group is active, input routes to the tab its focused pane references
@@ -510,6 +535,17 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 		     only the content area. Terminal sessions are mounted here regardless of whether
 		     file preview, AI output, or terminal is active. */
 		<div className="flex-1 min-h-0 overflow-hidden relative flex flex-col">
+			{/* Tiling drop-zone overlay: inert (click-through) until a tab drag begins,
+			    then hit-tests the panel to tile the dropped tab. Sits above the content
+			    (z-30) and below modal layers. Reads/writes only the tiling dataTransfer
+			    channel, so it never disturbs tab-bar reorder or multi-window drag-out. */}
+			<PaneDropZones
+				session={activeSession}
+				activeGroup={activeGroup ?? null}
+				activeStandaloneRef={singleViewRef}
+				activeStandaloneTitle={singleViewTitle}
+				theme={theme}
+			/>
 			{/* Tab tiling: an active tab group takes over the panel (ahead of the
 			    file/terminal/browser routing). The keep-alive terminal/browser overlays
 			    below still mount so their guests survive; they stay hidden while a group

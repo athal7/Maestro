@@ -30,6 +30,13 @@ import {
 	rebalanceLayout,
 	dissolveGroup,
 	MIN_PANE_FRACTION,
+	computeDropZone,
+	dropZoneToSplit,
+	insertRefIntoOrder,
+	tileTabIntoGroup,
+	createGroupFromDrop,
+	promotePaneToStandalone,
+	type DropRect,
 } from '../panelLayout';
 
 const aiRef = (id: string): UnifiedTabRef => ({ type: 'ai', id });
@@ -507,5 +514,275 @@ describe('dissolveGroup', () => {
 		expect(next.tabGroups).toHaveLength(1);
 		expect(next.activeGroupId).toBe(group.id);
 		expect(next.unifiedTabOrder).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: drop-zone geometry + drag-and-drop tiling edits.
+// ---------------------------------------------------------------------------
+
+describe('computeDropZone', () => {
+	// A 200x100 pane whose top-left is at (10, 20) - non-zero origin so the tests
+	// exercise the pointer-to-rect normalization, not just an origin-anchored box.
+	const rect: DropRect = { left: 10, top: 20, width: 200, height: 100 };
+	// Zone bands are the outer 25%: left < 60, right > 160, top < 45, bottom > 95.
+
+	it('returns center for a pointer in the inner core', () => {
+		expect(computeDropZone(rect, 110, 70)).toBe('center'); // dead center
+	});
+
+	it('classifies each edge band', () => {
+		expect(computeDropZone(rect, 15, 70)).toBe('left'); // far left column, vertically centered
+		expect(computeDropZone(rect, 205, 70)).toBe('right'); // far right column
+		expect(computeDropZone(rect, 110, 25)).toBe('top'); // top band, horizontally centered
+		expect(computeDropZone(rect, 110, 115)).toBe('bottom'); // bottom band
+	});
+
+	it('breaks a corner toward the more deeply penetrated band', () => {
+		// Top-left corner: nx≈0.025 (depth 0.225 into left) vs ny≈0.05 (depth 0.20
+		// into top). Left is deeper, so left wins.
+		expect(computeDropZone(rect, 15, 25)).toBe('left');
+		// Nudge toward the top edge so the top band is penetrated more deeply.
+		expect(computeDropZone(rect, 55, 21)).toBe('top');
+	});
+
+	it('clamps a pointer just outside the rect to the nearest edge band', () => {
+		expect(computeDropZone(rect, -100, 70)).toBe('left');
+		expect(computeDropZone(rect, 9999, 70)).toBe('right');
+	});
+
+	it('returns center for a degenerate (zero-area) rect', () => {
+		expect(computeDropZone({ left: 0, top: 0, width: 0, height: 100 }, 0, 50)).toBe('center');
+	});
+});
+
+describe('dropZoneToSplit', () => {
+	it('maps edges to direction + insert-before, center to null', () => {
+		expect(dropZoneToSplit('left')).toEqual({ direction: 'row', before: true });
+		expect(dropZoneToSplit('right')).toEqual({ direction: 'row', before: false });
+		expect(dropZoneToSplit('top')).toEqual({ direction: 'column', before: true });
+		expect(dropZoneToSplit('bottom')).toEqual({ direction: 'column', before: false });
+		expect(dropZoneToSplit('center')).toBeNull();
+	});
+});
+
+describe('insertRefIntoOrder', () => {
+	it('inserts at an index and dedupes any existing occurrence', () => {
+		const order = [aiRef('a'), aiRef('b'), aiRef('c')];
+		expect(insertRefIntoOrder(order, fileRef('x'), 1)).toEqual([
+			aiRef('a'),
+			fileRef('x'),
+			aiRef('b'),
+			aiRef('c'),
+		]);
+		// Re-inserting an existing ref removes the old copy first (no duplicate).
+		expect(insertRefIntoOrder(order, aiRef('c'), 0)).toEqual([aiRef('c'), aiRef('a'), aiRef('b')]);
+	});
+
+	it('appends for an out-of-range index', () => {
+		expect(insertRefIntoOrder([aiRef('a')], fileRef('x'), 99)).toEqual([aiRef('a'), fileRef('x')]);
+	});
+});
+
+describe('tileTabIntoGroup', () => {
+	/** Session stub with a single group and a dragged tab still in the order. */
+	function sessionWith(group: TabGroup, order: UnifiedTabRef[]): Session {
+		return {
+			id: 'sess',
+			unifiedTabOrder: order,
+			tabGroups: [group],
+			activeGroupId: group.id,
+		} as unknown as Session;
+	}
+
+	it('splits a leaf into a row and places the new pane before on a left drop', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = tileTabIntoGroup(
+			sessionWith(group, [fileRef('x')]),
+			'grp',
+			'l1',
+			'left',
+			fileRef('x')
+		);
+
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		expect(layout.direction).toBe('row');
+		// Flat insert before l1: [x, l1, l2].
+		expect(collectLeafTabRefs(layout)).toEqual([fileRef('x'), aiRef('a'), aiRef('b')]);
+		// Dragged ref removed from the strip (it now lives in the group).
+		expect(next.unifiedTabOrder).toEqual([]);
+	});
+
+	it('places the new pane after on a right drop', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = tileTabIntoGroup(
+			sessionWith(group, [fileRef('x')]),
+			'grp',
+			'l1',
+			'right',
+			fileRef('x')
+		);
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		expect(collectLeafTabRefs(layout)).toEqual([aiRef('a'), fileRef('x'), aiRef('b')]);
+	});
+
+	it('nests a column split on a top/bottom drop into a row group', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = tileTabIntoGroup(
+			sessionWith(group, [fileRef('x')]),
+			'grp',
+			'l1',
+			'top',
+			fileRef('x')
+		);
+		const root = next.tabGroups[0].layout;
+		if (root.kind !== 'split') throw new Error('expected split');
+		expect(root.direction).toBe('row');
+		// l1 replaced by a column split holding [x, l1] (x before, per top drop).
+		const nested = root.children[0];
+		if (nested.kind !== 'split') throw new Error('expected nested split');
+		expect(nested.direction).toBe('column');
+		expect(collectLeafTabRefs(nested)).toEqual([fileRef('x'), aiRef('a')]);
+	});
+
+	it('center adds as a sibling along the parent split direction', () => {
+		const group = groupFrom(
+			colSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = tileTabIntoGroup(
+			sessionWith(group, [fileRef('x')]),
+			'grp',
+			'l1',
+			'center',
+			fileRef('x')
+		);
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		// Parent is a column, so center flat-inserts after l1 in the column.
+		expect(layout.direction).toBe('column');
+		expect(collectLeafTabRefs(layout)).toEqual([aiRef('a'), fileRef('x'), aiRef('b')]);
+	});
+
+	it('is a no-op copy when the group or target leaf is missing', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const session = sessionWith(group, [fileRef('x')]);
+		expect(tileTabIntoGroup(session, 'nope', 'l1', 'left', fileRef('x')).unifiedTabOrder).toEqual([
+			fileRef('x'),
+		]);
+		expect(
+			tileTabIntoGroup(session, 'grp', 'missing', 'left', fileRef('x')).unifiedTabOrder
+		).toEqual([fileRef('x')]);
+	});
+});
+
+describe('createGroupFromDrop', () => {
+	function sessionWith(order: UnifiedTabRef[]): Session {
+		return {
+			id: 'sess',
+			unifiedTabOrder: order,
+			tabGroups: [],
+			activeGroupId: null,
+		} as unknown as Session;
+	}
+
+	it('creates a row group and removes BOTH refs from the strip', () => {
+		const session = sessionWith([aiRef('a'), fileRef('b'), aiRef('c')]);
+		const next = createGroupFromDrop(session, aiRef('a'), fileRef('b'), 'right', 'New Group');
+
+		expect(next.tabGroups).toHaveLength(1);
+		expect(next.activeGroupId).toBe(next.tabGroups[0].id);
+		// Both the target (a) and dragged (b) refs are pulled from the order.
+		expect(next.unifiedTabOrder).toEqual([aiRef('c')]);
+
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		expect(layout.direction).toBe('row');
+		// right drop -> dragged after target: [a, b].
+		expect(collectLeafTabRefs(layout)).toEqual([aiRef('a'), fileRef('b')]);
+	});
+
+	it('honors direction and order for a top drop (dragged before, column)', () => {
+		const session = sessionWith([aiRef('a'), fileRef('b')]);
+		const next = createGroupFromDrop(session, aiRef('a'), fileRef('b'), 'top', 'g');
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		expect(layout.direction).toBe('column');
+		// top drop -> dragged before target: [b, a].
+		expect(collectLeafTabRefs(layout)).toEqual([fileRef('b'), aiRef('a')]);
+	});
+
+	it('defaults center to a row with dragged after the target', () => {
+		const session = sessionWith([aiRef('a'), fileRef('b')]);
+		const next = createGroupFromDrop(session, aiRef('a'), fileRef('b'), 'center', 'g');
+		const layout = next.tabGroups[0].layout;
+		if (layout.kind !== 'split') throw new Error('expected split');
+		expect(layout.direction).toBe('row');
+		expect(collectLeafTabRefs(layout)).toEqual([aiRef('a'), fileRef('b')]);
+	});
+});
+
+describe('promotePaneToStandalone', () => {
+	function sessionWith(group: TabGroup, order: UnifiedTabRef[]): Session {
+		return {
+			id: 'sess',
+			unifiedTabOrder: order,
+			tabGroups: [group],
+			activeGroupId: group.id,
+		} as unknown as Session;
+	}
+
+	it('re-adds the promoted tab at the drop index and keeps a >=2-pane group', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b')), leaf('l3', aiRef('c'))]),
+			'l1'
+		);
+		const next = promotePaneToStandalone(sessionWith(group, [fileRef('z')]), 'grp', 'l2', 0);
+
+		// Promoted 'b' inserted at index 0 of the strip.
+		expect(next.unifiedTabOrder).toEqual([aiRef('b'), fileRef('z')]);
+		// Group survives with the two remaining panes.
+		expect(next.tabGroups).toHaveLength(1);
+		expect(collectLeafTabRefs(next.tabGroups[0].layout)).toEqual([aiRef('a'), aiRef('c')]);
+		expect(next.activeGroupId).toBe('grp');
+	});
+
+	it('auto-dissolves the group when it falls below two panes', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = promotePaneToStandalone(sessionWith(group, []), 'grp', 'l1', 0);
+
+		// Pulling l1 leaves a single pane -> group dissolves entirely.
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.activeGroupId).toBeNull();
+		// The promoted pane (a) lands at the drop index; the lone survivor (b) is
+		// promoted by dissolveGroup afterwards.
+		expect(next.unifiedTabOrder).toEqual([aiRef('a'), aiRef('b')]);
+	});
+
+	it('is a no-op copy when the group or leaf is missing', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const session = sessionWith(group, []);
+		expect(promotePaneToStandalone(session, 'nope', 'l1', 0).tabGroups).toHaveLength(1);
+		expect(promotePaneToStandalone(session, 'grp', 'missing', 0).unifiedTabOrder).toEqual([]);
 	});
 });
