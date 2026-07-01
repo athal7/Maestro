@@ -276,6 +276,8 @@ export function useSessionCrud(deps: UseSessionCrudDeps): UseSessionCrudReturn {
 					activeTerminalTabId: null,
 					unifiedTabOrder: [{ type: 'ai' as const, id: initialTabId }],
 					unifiedClosedTabHistory: [],
+					tabGroups: [],
+					activeGroupId: null,
 					nudgeMessage,
 					newSessionMessage,
 					customPath,

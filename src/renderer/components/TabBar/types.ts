@@ -1,4 +1,4 @@
-import type { AITab, Theme, UnifiedTab } from '../../types';
+import type { AITab, TabGroup, Theme, UnifiedTab } from '../../types';
 import type { CopyContextOptions } from '../../hooks/tabs/useTabExportHandlers';
 
 export interface TabBarProps {
@@ -93,6 +93,14 @@ export interface TabBarProps {
 	onCopyBrowserContent?: (tabId: string) => void;
 	/** Handler to send the rendered text of a browser tab to another agent */
 	onSendBrowserContentToAgent?: (tabId: string) => void;
+
+	// === Tab Tiling (split panes) ===
+	/** Tiled tab groups for this session, rendered as single chips in the strip */
+	tabGroups?: TabGroup[];
+	/** Currently active tab group id (null when a standalone tab is active) */
+	activeGroupId?: string | null;
+	/** Handler to activate a tab group (shows its tiled layout in the panel) */
+	onGroupSelect?: (groupId: string) => void;
 
 	// === Accessibility ===
 	/** Whether colorblind-friendly colors should be used for extension badges */

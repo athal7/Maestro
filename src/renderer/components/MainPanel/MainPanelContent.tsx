@@ -11,6 +11,7 @@ import { InputArea } from '../InputArea';
 import type { FilePreviewHandle } from '../FilePreview';
 import { WizardConversationView, DocumentGenerationView } from '../InlineWizard';
 import { BrowserTabView, type BrowserTabViewHandle } from './BrowserTabView';
+import { TiledLayout } from './TiledLayout';
 import { useBrowserTabMounting } from '../../hooks/browser/useBrowserTabMounting';
 import { useUIStore } from '../../stores/uiStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -461,6 +462,14 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 	// page state survives switching away. All mounted tabs render through the persistent
 	// overlay block below (mirroring the terminal keep-alive overlay).
 	const mountedBrowserTabIds = useBrowserTabMounting(activeSession);
+
+	// Tab tiling (split panes): when a tab group is active, it takes over the
+	// panel and renders its tiled layout instead of the single-view content. This
+	// branch is ahead of the file/terminal/browser routing below so the group wins.
+	const activeGroup =
+		activeSession.activeGroupId != null
+			? activeSession.tabGroups?.find((g) => g.id === activeSession.activeGroupId)
+			: undefined;
 	// Number of open modal/overlay layers. When any layer is open over a browser
 	// tab (e.g. the Tab Switcher), the guest <webview> must release Chromium input
 	// focus so keyboard navigation lands in the modal instead of the page. Driving
@@ -489,10 +498,16 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 		     only the content area. Terminal sessions are mounted here regardless of whether
 		     file preview, AI output, or terminal is active. */
 		<div className="flex-1 min-h-0 overflow-hidden relative flex flex-col">
-			{/* Browser tabs render through the persistent keep-alive overlay block below (not
+			{/* Tab tiling: an active tab group takes over the panel (ahead of the
+			    file/terminal/browser routing). The keep-alive terminal/browser overlays
+			    below still mount so their guests survive; they stay hidden while a group
+			    is active because no terminal/browser tab is the active single view. */}
+			{activeGroup ? (
+				<TiledLayout group={activeGroup} session={activeSession} theme={theme} />
+			) : /* Browser tabs render through the persistent keep-alive overlay block below (not
 			    inline) so their <webview> never remounts when switching tabs. Skip rendering
-			    inline content when loading a remote file - loading state takes over the area. */}
-			{activeSession.inputMode === 'ai' && activeFileTab?.isLoading ? (
+			    inline content when loading a remote file - loading state takes over the area. */
+			activeSession.inputMode === 'ai' && activeFileTab?.isLoading ? (
 				<div
 					className="flex-1 flex items-center justify-center"
 					style={{ backgroundColor: theme.colors.bgMain }}

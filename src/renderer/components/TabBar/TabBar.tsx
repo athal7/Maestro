@@ -1,7 +1,9 @@
 import React, { useState, useRef, useCallback, useEffect, memo, useMemo } from 'react';
-import { Bell } from 'lucide-react';
-import type { AITab } from '../../types';
-import { hasDraft } from '../../utils/tabHelpers';
+import { Bell, LayoutGrid } from 'lucide-react';
+import type { AITab, TabGroup, UnifiedTabRef } from '../../types';
+import { hasDraft, getTabDisplayName } from '../../utils/tabHelpers';
+import { updateSessionWith } from '../../stores/sessionStore';
+import { createGroupFromTabRefs, generateGroupName } from '../../utils/panelLayout';
 import { formatShortcutKeys } from '../../utils/shortcutFormatter';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { AITab as AITabComponent } from './AITab';
@@ -84,6 +86,9 @@ function TabBarInner({
 	onTerminalTabConfigureStartupCommand,
 	onCopyBrowserContent,
 	onSendBrowserContentToAgent,
+	tabGroups,
+	activeGroupId,
+	onGroupSelect,
 	colorBlindMode,
 	sshRemote,
 }: TabBarProps) {
@@ -709,7 +714,7 @@ function TabBarInner({
 									/>
 								</React.Fragment>
 							);
-						} else {
+						} else if (unifiedTab.type === 'browser') {
 							const browserTab = unifiedTab.data;
 							return (
 								<React.Fragment key={unifiedTab.id}>
@@ -747,6 +752,8 @@ function TabBarInner({
 								</React.Fragment>
 							);
 						}
+						// Group refs are rendered as separate chips below, not inline here.
+						return null;
 					})
 				: /* Legacy mode — AI tabs only */
 					displayedTabs.map((tab, index) => {
@@ -782,6 +789,30 @@ function TabBarInner({
 						);
 					})}
 
+			{/* Tab group chips - each tiled group shows as a single entry with a
+			    split/grid glyph so it reads as a group. Clicking activates the group,
+			    which makes MainPanelContent render its tiled layout. */}
+			{ownsActiveAgent &&
+				(tabGroups ?? []).map((group) => {
+					const isActive = group.id === activeGroupId;
+					return (
+						<button
+							key={group.id}
+							data-tab-id={group.id}
+							onClick={() => onGroupSelect?.(group.id)}
+							className="flex items-center gap-1.5 shrink-0 px-2 py-1 mb-1 rounded-t text-xs font-medium max-w-[180px] transition-colors"
+							style={{
+								color: isActive ? theme.colors.accentForeground : theme.colors.textMain,
+								backgroundColor: isActive ? theme.colors.accent : 'transparent',
+							}}
+							title={group.name}
+						>
+							<LayoutGrid className="w-3.5 h-3.5 shrink-0" />
+							<span className="truncate">{group.name}</span>
+						</button>
+					);
+				})}
+
 			{/* New tab button + popover */}
 			<NewTabPopover
 				theme={theme}
@@ -795,6 +826,89 @@ function TabBarInner({
 				terminalKeys={shortcuts.toggleMode?.keys ?? ['Meta', 'j']}
 				isOverflowing={isOverflowing}
 			/>
+
+			{/* TEMPORARY SCAFFOLDING (remove when drag-and-drop tiling lands): a
+			    "Tile open tabs" button that groups the currently-open standalone AI and
+			    file-preview tabs into one tiled TabGroup so the prototype is demonstrable
+			    without DnD. Guarded to require at least 2 eligible tabs. */}
+			{ownsActiveAgent && sessionId && (
+				<TileOpenTabsButton
+					theme={theme}
+					sessionId={sessionId}
+					unifiedTabs={unifiedTabs}
+					onGroupSelect={onGroupSelect}
+				/>
+			)}
+		</div>
+	);
+}
+
+/**
+ * TEMPORARY SCAFFOLDING - delete when drag-and-drop tiling ships.
+ *
+ * Collects the standalone AI and file-preview tab refs from the unified order,
+ * builds a TabGroup via createGroupFromTabRefs, removes those refs from
+ * unifiedTabOrder (so they stop showing as standalone chips), pushes the group
+ * onto session.tabGroups, and activates it - all in one updateSessionWith call.
+ * Requires at least 2 eligible tabs.
+ */
+function TileOpenTabsButton({
+	theme,
+	sessionId,
+	unifiedTabs,
+	onGroupSelect,
+}: {
+	theme: import('../../types').Theme;
+	sessionId: string;
+	unifiedTabs?: import('../../types').UnifiedTab[];
+	onGroupSelect?: (groupId: string) => void;
+}) {
+	// Only AI and file-preview tabs are eligible in this phase (terminal/browser
+	// tiling is deferred). Mirror the visual order.
+	const eligibleRefs: UnifiedTabRef[] = (unifiedTabs ?? [])
+		.filter((ut) => ut.type === 'ai' || ut.type === 'file')
+		.map((ut) => ({ type: ut.type, id: ut.id }));
+
+	if (eligibleRefs.length < 2) return null;
+
+	const handleTile = () => {
+		const firstTab = (unifiedTabs ?? []).find(
+			(ut) => ut.type === eligibleRefs[0].type && ut.id === eligibleRefs[0].id
+		);
+		const firstTitle =
+			firstTab?.type === 'ai'
+				? getTabDisplayName(firstTab.data)
+				: firstTab?.type === 'file'
+					? firstTab.data.name
+					: 'Tabs';
+		const group: TabGroup = createGroupFromTabRefs(eligibleRefs, generateGroupName(firstTitle));
+		updateSessionWith(sessionId, (s) => {
+			const eligibleKeys = new Set(eligibleRefs.map((r) => `${r.type}:${r.id}`));
+			return {
+				...s,
+				tabGroups: [...(s.tabGroups ?? []), group],
+				activeGroupId: group.id,
+				unifiedTabOrder: (s.unifiedTabOrder ?? []).filter(
+					(ref) => !eligibleKeys.has(`${ref.type}:${ref.id}`)
+				),
+			};
+		});
+		onGroupSelect?.(group.id);
+	};
+
+	return (
+		<div
+			className="flex items-center shrink-0 pr-2 self-stretch"
+			style={{ backgroundColor: theme.colors.bgSidebar, zIndex: 5 }}
+		>
+			<button
+				onClick={handleTile}
+				className="flex items-center justify-center w-6 h-6 rounded hover:bg-white/10 transition-colors"
+				style={{ color: theme.colors.textDim }}
+				title="Tile open tabs (temporary)"
+			>
+				<LayoutGrid className="w-4 h-4" />
+			</button>
 		</div>
 	);
 }

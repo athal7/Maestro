@@ -283,6 +283,30 @@ export const MainPanel = React.memo(
 			[setLogViewerOpen, setActiveSessionId, setSessions]
 		);
 
+		// Activate a tiled tab group: set activeGroupId (so MainPanelContent renders
+		// the group's layout) and clear the standalone active-tab ids/inputMode so no
+		// single-view content competes with the group for the panel.
+		const handleGroupSelect = useCallback(
+			(groupId: string) => {
+				if (!activeSession) return;
+				setSessions((prev) =>
+					prev.map((s) =>
+						s.id === activeSession.id
+							? {
+									...s,
+									activeGroupId: groupId,
+									activeFileTabId: null,
+									activeBrowserTabId: null,
+									activeTerminalTabId: null,
+									inputMode: 'ai',
+								}
+							: s
+					)
+				);
+			},
+			[activeSession, setSessions]
+		);
+
 		// Fetch available models, effort levels, and agent defaults when agent type changes.
 		// Uses a stale flag to prevent race conditions when switching between agents —
 		// without this, a slow response (e.g., `opencode models` subprocess) from the
@@ -907,6 +931,10 @@ export const MainPanel = React.memo(
 									onSendBrowserContentToAgent={
 										props.onSendTextToAgent ? handleSendBrowserContentToAgent : undefined
 									}
+									// Tab tiling (split panes)
+									tabGroups={activeSession.tabGroups}
+									activeGroupId={activeSession.activeGroupId}
+									onGroupSelect={handleGroupSelect}
 									// Accessibility
 									colorBlindMode={colorBlindMode}
 									// Hide local-only OS actions (Reveal in Finder) when the agent runs over SSH
