@@ -3,11 +3,10 @@ import React from 'react';
 import { TerminalOutput } from '../TerminalOutput';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { updateSessionWith } from '../../stores/sessionStore';
-import { getTabDisplayName } from '../../utils/tabHelpers';
-import { getTerminalTabDisplayName } from '../../utils/terminalTabHelpers';
 import {
 	findLeafById,
 	focusPaneInSession,
+	resolveTabRefTitle,
 	tabRefKey,
 	updateGroupInSession,
 	updateSplitSizes,
@@ -70,33 +69,6 @@ export interface TiledLayoutProps {
 	 * pane instead of filling the whole panel. Empty map when no such leaves.
 	 */
 	onPaneRectsChange?: (rects: PaneRects) => void;
-}
-
-/** Resolve a leaf's display title from the live tab it references. */
-function resolveLeafTitle(tab: UnifiedTabRef, session: Session): string {
-	switch (tab.type) {
-		case 'ai': {
-			const aiTab = session.aiTabs?.find((t) => t.id === tab.id);
-			return aiTab ? getTabDisplayName(aiTab) : 'AI';
-		}
-		case 'file': {
-			const fileTab = session.filePreviewTabs?.find((t) => t.id === tab.id);
-			return fileTab ? fileTab.name : 'File';
-		}
-		case 'terminal': {
-			const index = session.terminalTabs?.findIndex((t) => t.id === tab.id) ?? -1;
-			const terminalTab = index >= 0 ? session.terminalTabs[index] : undefined;
-			return terminalTab ? getTerminalTabDisplayName(terminalTab, index) : 'Terminal';
-		}
-		case 'browser': {
-			const browserTab = session.browserTabs?.find((t) => t.id === tab.id);
-			return browserTab
-				? (browserTab.customTitle ?? browserTab.title ?? browserTab.url)
-				: 'Browser';
-		}
-		default:
-			return 'Tab';
-	}
 }
 
 /**
@@ -233,7 +205,7 @@ function PaneFrame({
 	theme: Theme;
 	isFocused: boolean;
 }) {
-	const title = resolveLeafTitle(node.tab, session);
+	const title = resolveTabRefTitle(session, node.tab);
 	// Clicking anywhere in the pane focuses it (matches single-view "click to
 	// focus" and routes AI input to this pane). Cheap object-equality no-op when
 	// this pane is already focused, so idle clicks don't churn the store.

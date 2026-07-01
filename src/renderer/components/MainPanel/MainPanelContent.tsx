@@ -17,10 +17,10 @@ import {
 	findLeafById,
 	findLeafByTabRef,
 	focusPaneInSession,
+	resolveTabRefTitle,
 	splitPaneRectsByKind,
 } from '../../utils/panelLayout';
 import { updateSessionWith } from '../../stores/sessionStore';
-import { getTabDisplayName } from '../../utils/tabHelpers';
 import { useBrowserTabMounting } from '../../hooks/browser/useBrowserTabMounting';
 import { useUIStore } from '../../stores/uiStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -501,8 +501,10 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 		activeBrowserTabId,
 		activeTab,
 	]);
-	const singleViewTitle =
-		activeFileTab?.name ?? (activeTab ? getTabDisplayName(activeTab) : 'Tabs');
+	// Title of the single-view tab (the first tab placed into a new group), resolved
+	// across all four kinds via the shared resolver so auto-naming a group off a
+	// terminal/browser view uses its real title, not a generic "Tabs".
+	const singleViewTitle = singleViewRef ? resolveTabRefTitle(activeSession, singleViewRef) : 'Tabs';
 	// Transient maximize/zoom (Ctrl+Cmd+Z): id of the pane rendered full-panel.
 	const zoomedPaneId = useUIStore((s) => s.zoomedPaneId);
 	// When a group is active, input routes to the tab its focused pane references

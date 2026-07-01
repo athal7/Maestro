@@ -101,6 +101,16 @@ export interface TabBarProps {
 	activeGroupId?: string | null;
 	/** Handler to activate a tab group (shows its tiled layout in the panel) */
 	onGroupSelect?: (groupId: string) => void;
+	/**
+	 * Rename a tab group. `name` is the raw user input; the handler trims it and
+	 * falls back to the group's auto-generated name when empty. Persisted upstream.
+	 */
+	onGroupRename?: (groupId: string, name: string) => void;
+	/**
+	 * Break a tab group apart: split it back into individual standalone tabs. The
+	 * chip gates this behind a confirmation dialog before invoking the handler.
+	 */
+	onGroupBreakApart?: (groupId: string) => void;
 
 	// === Accessibility ===
 	/** Whether colorblind-friendly colors should be used for extension badges */

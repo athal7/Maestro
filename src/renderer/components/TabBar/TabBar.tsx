@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, memo, useMemo } from 'react';
-import { Bell, LayoutGrid } from 'lucide-react';
+import { Bell } from 'lucide-react';
 import type { AITab, UnifiedTabRef } from '../../types';
 import { hasDraft } from '../../utils/tabHelpers';
 import { updateSessionWith } from '../../stores/sessionStore';
@@ -15,6 +15,7 @@ import { AITab as AITabComponent } from './AITab';
 import { BrowserTabItem } from './BrowserTabItem';
 import { FileTab } from './FileTab';
 import { TerminalTabItem } from './TerminalTabItem';
+import { GroupTabChip } from './GroupTabChip';
 import { NewTabPopover } from './NewTabPopover';
 import { SearchPopover } from './SearchPopover';
 import { isUnifiedTabActive, getShortcutHint } from './tabBarUtils';
@@ -94,6 +95,8 @@ function TabBarInner({
 	tabGroups,
 	activeGroupId,
 	onGroupSelect,
+	onGroupRename,
+	onGroupBreakApart,
 	colorBlindMode,
 	sshRemote,
 }: TabBarProps) {
@@ -866,28 +869,21 @@ function TabBarInner({
 					})}
 
 			{/* Tab group chips - each tiled group shows as a single entry with a
-			    split/grid glyph so it reads as a group. Clicking activates the group,
-			    which makes MainPanelContent render its tiled layout. */}
+			    split/grid glyph so it reads as a group. Clicking activates the group;
+			    double-click (or the overlay menu) renames it; the overlay's "Break
+			    apart" splits it back into standalone tabs (gated by a confirm dialog). */}
 			{ownsActiveAgent &&
-				(tabGroups ?? []).map((group) => {
-					const isActive = group.id === activeGroupId;
-					return (
-						<button
-							key={group.id}
-							data-tab-id={group.id}
-							onClick={() => onGroupSelect?.(group.id)}
-							className="flex items-center gap-1.5 shrink-0 px-2 py-1 mb-1 rounded-t text-xs font-medium max-w-[180px] transition-colors"
-							style={{
-								color: isActive ? theme.colors.accentForeground : theme.colors.textMain,
-								backgroundColor: isActive ? theme.colors.accent : 'transparent',
-							}}
-							title={group.name}
-						>
-							<LayoutGrid className="w-3.5 h-3.5 shrink-0" />
-							<span className="truncate">{group.name}</span>
-						</button>
-					);
-				})}
+				(tabGroups ?? []).map((group) => (
+					<GroupTabChip
+						key={group.id}
+						group={group}
+						isActive={group.id === activeGroupId}
+						theme={theme}
+						onSelect={(groupId) => onGroupSelect?.(groupId)}
+						onRename={onGroupRename}
+						onBreakApart={onGroupBreakApart}
+					/>
+				))}
 
 			{/* New tab button + popover */}
 			<NewTabPopover

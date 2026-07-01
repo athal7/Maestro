@@ -38,6 +38,10 @@ import {
 	promotePaneToStandalone,
 	tabRefKey,
 	splitPaneRectsByKind,
+	breakApartGroup,
+	renameGroup,
+	normalizeTabGroups,
+	resolveTabRefTitle,
 	type DropRect,
 } from '../panelLayout';
 import type { PaneRects } from '../../types';
@@ -835,5 +839,327 @@ describe('splitPaneRectsByKind', () => {
 		const { terminals, browsers } = splitPaneRectsByKind(new Map());
 		expect(terminals.size).toBe(0);
 		expect(browsers.size).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5: naming, break apart, rename, and persistence hardening.
+// ---------------------------------------------------------------------------
+
+describe('resolveTabRefTitle', () => {
+	function sessionWithTabs(extra?: Partial<Session>): Session {
+		return {
+			aiTabs: [{ id: 'a1', name: 'My Chat' }],
+			filePreviewTabs: [{ id: 'f1', name: 'README.md' }],
+			terminalTabs: [{ id: 't1', name: null }],
+			browserTabs: [{ id: 'b1', customTitle: undefined, title: 'Docs', url: 'https://x' }],
+			...extra,
+		} as unknown as Session;
+	}
+
+	it('resolves each tab kind from its live tab', () => {
+		const s = sessionWithTabs();
+		expect(resolveTabRefTitle(s, aiRef('a1'))).toBe('My Chat');
+		expect(resolveTabRefTitle(s, fileRef('f1'))).toBe('README.md');
+		// Unnamed terminal falls back to the 1-based index label.
+		expect(resolveTabRefTitle(s, { type: 'terminal', id: 't1' })).toBe('Terminal 1');
+		expect(resolveTabRefTitle(s, { type: 'browser', id: 'b1' })).toBe('Docs');
+	});
+
+	it('prefers a browser customTitle, then title, then url', () => {
+		const s = sessionWithTabs({
+			browserTabs: [{ id: 'b1', customTitle: 'Pinned', title: 'Docs', url: 'https://x' }],
+		} as unknown as Partial<Session>);
+		expect(resolveTabRefTitle(s, { type: 'browser', id: 'b1' })).toBe('Pinned');
+	});
+
+	it('returns a per-kind fallback when the tab no longer exists', () => {
+		const s = sessionWithTabs();
+		expect(resolveTabRefTitle(s, aiRef('gone'))).toBe('AI');
+		expect(resolveTabRefTitle(s, fileRef('gone'))).toBe('File');
+		expect(resolveTabRefTitle(s, { type: 'terminal', id: 'gone' })).toBe('Terminal');
+		expect(resolveTabRefTitle(s, { type: 'browser', id: 'gone' })).toBe('Browser');
+	});
+});
+
+describe('renameGroup', () => {
+	function sessionWith(group: TabGroup): Session {
+		return { id: 'sess', tabGroups: [group], activeGroupId: group.id } as unknown as Session;
+	}
+
+	it('trims and persists a new name', () => {
+		const group = groupFrom(rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]));
+		const next = renameGroup(sessionWith(group), 'grp', '  Backend work  ', 'Group: a');
+		expect(next.tabGroups[0].name).toBe('Backend work');
+	});
+
+	it('falls back to the auto name when the input is blank', () => {
+		const group = groupFrom(rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]));
+		const next = renameGroup(sessionWith(group), 'grp', '   ', 'Group: a');
+		expect(next.tabGroups[0].name).toBe('Group: a');
+	});
+
+	it('is a no-op copy when the group is unknown', () => {
+		const group = groupFrom(rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]));
+		const next = renameGroup(sessionWith(group), 'missing', 'x', 'Group: a');
+		expect(next.tabGroups[0].name).toBe('g');
+	});
+});
+
+describe('breakApartGroup', () => {
+	function sessionWith(group: TabGroup, order: UnifiedTabRef[] = []): Session {
+		return {
+			id: 'sess',
+			unifiedTabOrder: order,
+			tabGroups: [group],
+			activeGroupId: group.id,
+			activeTabId: 'x',
+			inputMode: 'terminal',
+		} as unknown as Session;
+	}
+
+	it('promotes every pane back to the strip in left-to-right order and removes the group', () => {
+		const group = groupFrom(
+			rowSplit('root', [
+				leaf('l1', aiRef('a')),
+				leaf('l2', fileRef('b')),
+				leaf('l3', { type: 'terminal', id: 'c' }),
+			]),
+			'l2'
+		);
+		const next = breakApartGroup(sessionWith(group), 'grp');
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.activeGroupId).toBeNull();
+		expect(next.unifiedTabOrder).toEqual([aiRef('a'), fileRef('b'), { type: 'terminal', id: 'c' }]);
+	});
+
+	it('lands focus on the first promoted tab when it is an AI tab', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l2'
+		);
+		const next = breakApartGroup(sessionWith(group), 'grp');
+		expect(next.activeTabId).toBe('a');
+		expect(next.inputMode).toBe('ai');
+	});
+
+	it('leaves activeTabId/inputMode untouched when the first pane is not an AI tab', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', fileRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = breakApartGroup(sessionWith(group), 'grp');
+		expect(next.activeTabId).toBe('x');
+		expect(next.inputMode).toBe('terminal');
+	});
+
+	it('is a no-op copy when the group is unknown', () => {
+		const group = groupFrom(rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]));
+		const next = breakApartGroup(sessionWith(group), 'missing');
+		expect(next.tabGroups).toHaveLength(1);
+		expect(next.activeGroupId).toBe('grp');
+	});
+});
+
+describe('auto-dissolve funnels through removeLeafByTabRef + countLeaves', () => {
+	// Mirrors the close-focused-pane composition (useTilingShortcuts): remove the
+	// focused leaf, and if fewer than two panes remain, dissolve the group. This
+	// asserts the shared teardown rule holds independent of the UI handler.
+	function closePaneLike(session: Session, groupId: string, removed: UnifiedTabRef): Session {
+		const group = session.tabGroups.find((g) => g.id === groupId);
+		if (!group) return session;
+		const nextLayout = removeLeafByTabRef(group.layout, removed);
+		if (!nextLayout || countLeaves(nextLayout) <= 1) {
+			// Promote the removed ref (it left the layout) then dissolve the leftovers.
+			const withRef = { ...session, unifiedTabOrder: [...session.unifiedTabOrder, removed] };
+			return dissolveGroup(withRef, groupId);
+		}
+		return {
+			...session,
+			tabGroups: session.tabGroups.map((g) =>
+				g.id === groupId ? { ...g, layout: rebalanceLayout(nextLayout) } : g
+			),
+		};
+	}
+
+	function sessionWith(group: TabGroup): Session {
+		return {
+			id: 'sess',
+			unifiedTabOrder: [],
+			tabGroups: [group],
+			activeGroupId: group.id,
+		} as unknown as Session;
+	}
+
+	it('close-pane keeps a group with 3+ panes (removes one, no dissolve)', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b')), leaf('l3', aiRef('c'))]),
+			'l2'
+		);
+		const next = closePaneLike(sessionWith(group), 'grp', aiRef('b'));
+		expect(next.tabGroups).toHaveLength(1);
+		expect(collectLeafTabRefs(next.tabGroups[0].layout)).toEqual([aiRef('a'), aiRef('c')]);
+	});
+
+	it('close-pane auto-dissolves when it drops below two panes', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = closePaneLike(sessionWith(group), 'grp', aiRef('a'));
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.activeGroupId).toBeNull();
+		// Removed 'a' promoted, then the lone survivor 'b' promoted by dissolveGroup.
+		expect(next.unifiedTabOrder).toEqual([aiRef('a'), aiRef('b')]);
+	});
+
+	it('drag-out (promotePaneToStandalone) auto-dissolves below two panes', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b'))]),
+			'l1'
+		);
+		const next = promotePaneToStandalone(sessionWith(group), 'grp', 'l1', 0);
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.activeGroupId).toBeNull();
+		expect(next.unifiedTabOrder).toEqual([aiRef('a'), aiRef('b')]);
+	});
+});
+
+describe('normalizeTabGroups', () => {
+	// A Session stub carrying the tab arrays + group fields normalizeTabGroups reads.
+	function sessionWith(
+		groups: TabGroup[],
+		opts: {
+			aiIds?: string[];
+			fileIds?: string[];
+			termIds?: string[];
+			browserIds?: string[];
+			order?: UnifiedTabRef[];
+			activeGroupId?: string | null;
+		} = {}
+	): Session {
+		return {
+			id: 'sess',
+			aiTabs: (opts.aiIds ?? []).map((id) => ({ id })),
+			filePreviewTabs: (opts.fileIds ?? []).map((id) => ({ id })),
+			terminalTabs: (opts.termIds ?? []).map((id) => ({ id })),
+			browserTabs: (opts.browserIds ?? []).map((id) => ({ id })),
+			unifiedTabOrder: opts.order ?? [],
+			tabGroups: groups,
+			activeGroupId: opts.activeGroupId ?? groups[0]?.id ?? null,
+		} as unknown as Session;
+	}
+
+	it('returns the same session untouched when there are no groups', () => {
+		const s = sessionWith([]);
+		expect(normalizeTabGroups(s)).toBe(s);
+	});
+
+	it('prunes a dangling leaf and keeps a still-valid group (renormalized, focus repointed)', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('gone')), leaf('l3', aiRef('c'))]),
+			'l2'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: ['a', 'c'] }));
+		expect(next.tabGroups).toHaveLength(1);
+		// The dangling 'gone' leaf is pruned; 'a' and 'c' survive.
+		expect(collectLeafTabRefs(next.tabGroups[0].layout)).toEqual([aiRef('a'), aiRef('c')]);
+		// Sizes renormalize to sum to 1.
+		expect(sizesSum(next.tabGroups[0].layout)).toBe(1);
+		// Focus was on the pruned leaf, so it moves to the first surviving leaf.
+		expect(next.tabGroups[0].focusedPaneId).toBe('l1');
+	});
+
+	it('collapses a single-child split left after pruning', () => {
+		// A group whose root row holds a leaf and a nested column; the column loses
+		// one child to pruning and collapses into its lone survivor.
+		const group = groupFrom(
+			rowSplit('root', [
+				leaf('l1', aiRef('a')),
+				colSplit('col', [leaf('l2', aiRef('b')), leaf('l3', aiRef('gone'))]),
+			]),
+			'l1'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: ['a', 'b'] }));
+		expect(next.tabGroups).toHaveLength(1);
+		const layout = next.tabGroups[0].layout;
+		// Root is still a 2-child row, but the second child collapsed to a bare leaf.
+		expect(layout.kind).toBe('split');
+		if (layout.kind === 'split') {
+			expect(layout.children).toHaveLength(2);
+			expect(layout.children[1]).toMatchObject({ kind: 'leaf', tab: aiRef('b') });
+		}
+		expect(collectLeafTabRefs(layout)).toEqual([aiRef('a'), aiRef('b')]);
+	});
+
+	it('dissolves a group that drops below two leaves, promoting the survivor', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('gone'))]),
+			'l1'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: ['a'], order: [] }));
+		expect(next.tabGroups).toHaveLength(0);
+		// The lone survivor 'a' is promoted back to the strip.
+		expect(next.unifiedTabOrder).toEqual([aiRef('a')]);
+	});
+
+	it('does not double-promote a survivor already in unifiedTabOrder', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('gone'))]),
+			'l1'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: ['a'], order: [aiRef('a')] }));
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.unifiedTabOrder).toEqual([aiRef('a')]);
+	});
+
+	it('drops a group whose every leaf is dangling (nothing to promote)', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('gone1')), leaf('l2', aiRef('gone2'))]),
+			'l1'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: [], order: [] }));
+		expect(next.tabGroups).toHaveLength(0);
+		expect(next.unifiedTabOrder).toEqual([]);
+	});
+
+	it('clears activeGroupId when it points at a removed group', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('gone'))]),
+			'l1'
+		);
+		const next = normalizeTabGroups(sessionWith([group], { aiIds: ['a'], activeGroupId: 'grp' }));
+		expect(next.activeGroupId).toBeNull();
+	});
+
+	it('keeps activeGroupId when its group survives normalization', () => {
+		const group = groupFrom(
+			rowSplit('root', [leaf('l1', aiRef('a')), leaf('l2', aiRef('b')), leaf('l3', aiRef('gone'))]),
+			'l1'
+		);
+		const next = normalizeTabGroups(
+			sessionWith([group], { aiIds: ['a', 'b'], activeGroupId: 'grp' })
+		);
+		expect(next.tabGroups).toHaveLength(1);
+		expect(next.activeGroupId).toBe('grp');
+	});
+
+	it('handles mixed tab kinds when checking liveness', () => {
+		const group = groupFrom(
+			rowSplit('root', [
+				leaf('l1', { type: 'terminal', id: 't1' }),
+				leaf('l2', { type: 'browser', id: 'b1' }),
+				leaf('l3', fileRef('gone-file')),
+			]),
+			'l1'
+		);
+		const next = normalizeTabGroups(
+			sessionWith([group], { termIds: ['t1'], browserIds: ['b1'], fileIds: [] })
+		);
+		expect(next.tabGroups).toHaveLength(1);
+		expect(collectLeafTabRefs(next.tabGroups[0].layout)).toEqual([
+			{ type: 'terminal', id: 't1' },
+			{ type: 'browser', id: 'b1' },
+		]);
 	});
 });

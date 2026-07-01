@@ -17,6 +17,8 @@ import type {
 	UnifiedTabRef,
 } from '../types';
 import { generateId } from './ids';
+import { getTabDisplayName } from './tabHelpers';
+import { getTerminalTabDisplayName } from './terminalTabHelpers';
 
 /**
  * Minimum fractional size a pane may shrink to during a resize. Splits normalize
@@ -281,6 +283,40 @@ export function countLeaves(layout: PanelLayoutNode): number {
 	return layout.children.reduce((sum, child) => sum + countLeaves(child), 0);
 }
 
+/**
+ * Resolve a unified tab ref to its display title from the live tab it references,
+ * covering all four kinds: AI (`getTabDisplayName`), file (tab name), terminal
+ * (`getTerminalTabDisplayName` with its 1-based index), and browser (user title >
+ * page title > URL). Returns a per-kind fallback when the tab no longer exists.
+ * The single source of truth for a leaf's/pane's title, used both by TiledLayout's
+ * pane title bars and by group auto-naming so the two never diverge.
+ */
+export function resolveTabRefTitle(session: Session, ref: UnifiedTabRef): string {
+	switch (ref.type) {
+		case 'ai': {
+			const aiTab = session.aiTabs?.find((t) => t.id === ref.id);
+			return aiTab ? getTabDisplayName(aiTab) : 'AI';
+		}
+		case 'file': {
+			const fileTab = session.filePreviewTabs?.find((t) => t.id === ref.id);
+			return fileTab ? fileTab.name : 'File';
+		}
+		case 'terminal': {
+			const index = session.terminalTabs?.findIndex((t) => t.id === ref.id) ?? -1;
+			const terminalTab = index >= 0 ? session.terminalTabs[index] : undefined;
+			return terminalTab ? getTerminalTabDisplayName(terminalTab, index) : 'Terminal';
+		}
+		case 'browser': {
+			const browserTab = session.browserTabs?.find((t) => t.id === ref.id);
+			return browserTab
+				? (browserTab.customTitle ?? browserTab.title ?? browserTab.url)
+				: 'Browser';
+		}
+		default:
+			return 'Tab';
+	}
+}
+
 /** Build an auto group name from the first tab's title (used for auto-naming). */
 export function generateGroupName(firstTabTitle: string): string {
 	return `Group: ${firstTabTitle}`;
@@ -489,6 +525,45 @@ export function dissolveGroup(session: Session, groupId: string): Session {
 		tabGroups: session.tabGroups.filter((g) => g.id !== groupId),
 		activeGroupId: session.activeGroupId === groupId ? null : session.activeGroupId,
 	};
+}
+
+/**
+ * Explicitly break a group apart (the "Break apart" action): promote every leaf
+ * back into `unifiedTabOrder` in left-to-right pane order, drop the group, clear
+ * `activeGroupId` if it pointed here, and land `activeTabId`/`inputMode` on the
+ * first promoted tab when it is an AI tab (so the panel doesn't strand focus on a
+ * torn-down group). Distinct from the silent auto-dissolve: this is only ever
+ * called after a user confirms. Reuses {@link dissolveGroup} for the promotion /
+ * teardown so the two paths can never drift. A no-op copy when the id is unknown.
+ */
+export function breakApartGroup(session: Session, groupId: string): Session {
+	const group = session.tabGroups.find((g) => g.id === groupId);
+	if (!group) return session;
+	// Capture the first pane's tab before the group is torn down so focus can land
+	// on it (left-to-right leaf order matches collectLeafTabRefs).
+	const firstRef = collectLeafTabRefs(group.layout)[0] ?? null;
+	const dissolved = dissolveGroup(session, groupId);
+	if (firstRef && firstRef.type === 'ai') {
+		return { ...dissolved, activeTabId: firstRef.id, inputMode: 'ai' };
+	}
+	return dissolved;
+}
+
+/**
+ * Rename the group `groupId` to `name`, trimming whitespace. A blank name falls
+ * back to `fallbackName` (the auto-generated name from the group's first tab), so
+ * clearing the field never leaves an unnamed chip. A no-op copy when the group
+ * isn't found. Pairs with `updateSessionWith` in the rename handler.
+ */
+export function renameGroup(
+	session: Session,
+	groupId: string,
+	name: string,
+	fallbackName: string
+): Session {
+	const trimmed = name.trim();
+	const finalName = trimmed.length > 0 ? trimmed : fallbackName;
+	return updateGroupInSession(session, groupId, (g) => ({ ...g, name: finalName }));
 }
 
 /**
@@ -790,4 +865,129 @@ function collectLeafIds(node: PanelLayoutNode, out: Set<string>): void {
 		return;
 	}
 	node.children.forEach((child) => collectLeafIds(child, out));
+}
+
+/**
+ * Build the set of `tabRefKey`s the session still has live tab data for. A layout
+ * leaf whose ref isn't in this set is dangling (its tab was closed while the group
+ * was persisted) and gets pruned during normalization.
+ */
+function liveTabRefKeys(session: Session): Set<string> {
+	const keys = new Set<string>();
+	for (const t of session.aiTabs ?? []) keys.add(`ai:${t.id}`);
+	for (const t of session.filePreviewTabs ?? []) keys.add(`file:${t.id}`);
+	for (const t of session.terminalTabs ?? []) keys.add(`terminal:${t.id}`);
+	for (const t of session.browserTabs ?? []) keys.add(`browser:${t.id}`);
+	return keys;
+}
+
+/**
+ * Prune every leaf whose tab ref is not in `liveKeys` from the layout tree,
+ * renormalizing surviving `sizes` and collapsing any split reduced to a single
+ * child (same shape as {@link removeLeafByTabRef}, but keyed on a liveness set so
+ * one pass drops all dangling leaves). Returns `null` when nothing survives.
+ */
+function pruneLayoutToLiveTabs(
+	node: PanelLayoutNode,
+	liveKeys: Set<string>
+): PanelLayoutNode | null {
+	if (node.kind === 'leaf') {
+		return liveKeys.has(tabRefKey(node.tab)) ? node : null;
+	}
+	const survivors: PanelLayoutNode[] = [];
+	const survivorSizes: number[] = [];
+	node.children.forEach((child, index) => {
+		const kept = pruneLayoutToLiveTabs(child, liveKeys);
+		if (kept !== null) {
+			survivors.push(kept);
+			survivorSizes.push(node.sizes[index] ?? 1 / node.children.length);
+		}
+	});
+	if (survivors.length === 0) return null;
+	// Collapse a split left with a single child into that child.
+	if (survivors.length === 1) return survivors[0];
+	return { ...node, children: survivors, sizes: normalizeSizes(survivorSizes) };
+}
+
+/**
+ * Harden a persisted session's tab groups so a corrupt or partial layout can never
+ * break the panel on restore. For each group it: prunes any layout leaf whose
+ * referenced tab no longer exists in `aiTabs`/`filePreviewTabs`/`terminalTabs`/
+ * `browserTabs`, collapses the resulting single-child splits and renormalizes
+ * `sizes`, and drops any group that ends up with fewer than two leaves (promoting
+ * the lone survivor, if any, back into `unifiedTabOrder`). Finally it clears
+ * `activeGroupId` when it points at a group that was removed. Pure: returns a new
+ * Session (same reference-shape as the other helpers), never mutating the input.
+ *
+ * Wired into the session-restoration path so it runs once per session before it
+ * lands in the store. A session with no groups round-trips untouched.
+ */
+export function normalizeTabGroups(session: Session): Session {
+	const groups = session.tabGroups ?? [];
+	if (groups.length === 0) return session;
+
+	const liveKeys = liveTabRefKeys(session);
+	const alreadyOrdered = new Set((session.unifiedTabOrder ?? []).map(tabRefKey));
+
+	const keptGroups: TabGroup[] = [];
+	const promoted: UnifiedTabRef[] = [];
+	const removedGroupIds = new Set<string>();
+	// Stays false while every group survives with all its leaves intact, so a fully
+	// valid session round-trips as the same reference (cheap no-op on the hot path).
+	let changed = false;
+
+	for (const group of groups) {
+		const originalLeafCount = countLeaves(group.layout);
+		const prunedLayout = pruneLayoutToLiveTabs(group.layout, liveKeys);
+		// A tiled group needs at least two panes to be meaningful. Anything below
+		// that (all leaves dangling, or a single survivor) is torn down; a lone
+		// survivor is promoted back to a standalone tab.
+		if (!prunedLayout || countLeaves(prunedLayout) < 2) {
+			changed = true;
+			removedGroupIds.add(group.id);
+			if (prunedLayout) {
+				for (const ref of collectLeafTabRefs(prunedLayout)) {
+					if (!alreadyOrdered.has(tabRefKey(ref))) {
+						alreadyOrdered.add(tabRefKey(ref));
+						promoted.push(ref);
+					}
+				}
+			}
+			continue;
+		}
+		// No leaf pruned: keep the original group reference untouched.
+		if (countLeaves(prunedLayout) === originalLeafCount) {
+			keptGroups.push(group);
+			continue;
+		}
+		// Some leaves were pruned: swap in the pruned layout and repoint focus if the
+		// focused pane was among the leaves that got pruned away.
+		changed = true;
+		const focusStillValid =
+			group.focusedPaneId != null && findLeafById(prunedLayout, group.focusedPaneId) != null;
+		keptGroups.push({
+			...group,
+			layout: prunedLayout,
+			focusedPaneId: focusStillValid ? group.focusedPaneId : firstLeafId(prunedLayout),
+		});
+	}
+
+	const nextActiveGroupId =
+		session.activeGroupId != null && removedGroupIds.has(session.activeGroupId)
+			? null
+			: session.activeGroupId;
+	if (nextActiveGroupId !== session.activeGroupId) changed = true;
+
+	// Nothing changed: return the same reference so callers can cheaply skip work.
+	if (!changed) return session;
+
+	return {
+		...session,
+		tabGroups: keptGroups,
+		unifiedTabOrder:
+			promoted.length > 0
+				? [...(session.unifiedTabOrder ?? []), ...promoted]
+				: session.unifiedTabOrder,
+		activeGroupId: nextActiveGroupId,
+	};
 }

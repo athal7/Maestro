@@ -18,8 +18,14 @@ import type { BrowserTabViewHandle } from './BrowserTabView';
 import { gitService } from '../../services/git';
 import { useAgentCapabilities } from '../../hooks';
 import { useUIStore } from '../../stores/uiStore';
-import { useSessionStore, selectActiveSession } from '../../stores/sessionStore';
+import { useSessionStore, selectActiveSession, updateSessionWith } from '../../stores/sessionStore';
 import { useTabStore } from '../../stores/tabStore';
+import {
+	breakApartGroup,
+	collectLeafTabRefs,
+	generateGroupName,
+	resolveTabRefTitle,
+} from '../../utils/panelLayout';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { notifyCenterFlash } from '../../stores/centerFlashStore';
 import { useTerminalMounting } from '../../hooks/terminal/useTerminalMounting';
@@ -305,6 +311,34 @@ export const MainPanel = React.memo(
 				);
 			},
 			[activeSession, setSessions]
+		);
+
+		// Rename a group chip. Delegates to the tab-store rename action, resolving the
+		// auto-name fallback (used when the user clears the field) from the group's
+		// first pane title via the shared resolver so it matches the drop-time name.
+		const renameGroupAction = useTabStore((s) => s.renameGroup);
+		const handleGroupRename = useCallback(
+			(groupId: string, name: string) => {
+				if (!activeSession) return;
+				const group = activeSession.tabGroups?.find((g) => g.id === groupId);
+				const firstRef = group ? collectLeafTabRefs(group.layout)[0] : undefined;
+				const fallback = firstRef
+					? generateGroupName(resolveTabRefTitle(activeSession, firstRef))
+					: (group?.name ?? 'Group');
+				renameGroupAction(groupId, name, fallback);
+			},
+			[activeSession, renameGroupAction]
+		);
+
+		// Break a group apart into standalone tabs (the confirm dialog lives in the
+		// group chip). Promotes every pane back to the tab bar in left-to-right order,
+		// drops the group, and lands focus on the first promoted tab.
+		const handleGroupBreakApart = useCallback(
+			(groupId: string) => {
+				if (!activeSession) return;
+				updateSessionWith(activeSession.id, (s) => breakApartGroup(s, groupId));
+			},
+			[activeSession]
 		);
 
 		// Fetch available models, effort levels, and agent defaults when agent type changes.
@@ -935,6 +969,8 @@ export const MainPanel = React.memo(
 									tabGroups={activeSession.tabGroups}
 									activeGroupId={activeSession.activeGroupId}
 									onGroupSelect={handleGroupSelect}
+									onGroupRename={handleGroupRename}
+									onGroupBreakApart={handleGroupBreakApart}
 									// Accessibility
 									colorBlindMode={colorBlindMode}
 									// Hide local-only OS actions (Reveal in Finder) when the agent runs over SSH
