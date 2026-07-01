@@ -8,7 +8,14 @@
 // tab never copies or relocates its state. Splits arrange children in a row or
 // column with fractional `sizes` (one weight per child, summing to 1).
 
-import type { PanelLayoutNode, Session, TabGroup, UnifiedTabRef } from '../types';
+import type {
+	PaneRect,
+	PaneRects,
+	PanelLayoutNode,
+	Session,
+	TabGroup,
+	UnifiedTabRef,
+} from '../types';
 import { generateId } from './ids';
 
 /**
@@ -342,7 +349,7 @@ export function setFocusedPane(group: TabGroup, leafId: string): TabGroup {
 }
 
 /** A pane's position in the group's normalized [0,1] x [0,1] coordinate space. */
-interface PaneRect {
+interface NormalizedPaneRect {
 	leafId: string;
 	x: number;
 	y: number;
@@ -363,7 +370,7 @@ function computePaneRects(
 	y: number,
 	width: number,
 	height: number,
-	out: PaneRect[]
+	out: NormalizedPaneRect[]
 ): void {
 	if (node.kind === 'leaf') {
 		out.push({ leafId: node.id, x, y, width, height });
@@ -393,7 +400,7 @@ export function findPaneInDirection(
 	fromLeafId: string,
 	direction: 'left' | 'right' | 'up' | 'down'
 ): string | null {
-	const rects: PaneRect[] = [];
+	const rects: NormalizedPaneRect[] = [];
 	computePaneRects(group.layout, 0, 0, 1, 1, rects);
 	const from = rects.find((r) => r.leafId === fromLeafId);
 	if (!from) return null;
@@ -403,7 +410,7 @@ export function findPaneInDirection(
 	// Small epsilon so panes sharing an exact edge count as "beyond" the source.
 	const EPS = 1e-6;
 
-	let best: { rect: PaneRect; travel: number; overlap: number } | null = null;
+	let best: { rect: NormalizedPaneRect; travel: number; overlap: number } | null = null;
 	for (const rect of rects) {
 		if (rect.leafId === fromLeafId) continue;
 
@@ -530,9 +537,34 @@ export function focusPaneInSession(session: Session, groupId: string, leafId: st
 	return aiId ? { ...withFocus, activeTabId: aiId, inputMode: 'ai' } : withFocus;
 }
 
-/** Stable key for a tab ref (used to dedupe / match refs by value in a Set). */
-function tabRefKey(ref: UnifiedTabRef): string {
+/**
+ * Stable key for a tab ref (used to dedupe / match refs by value in a Set, and
+ * to key the per-pane geometry map the tiled layout publishes for keep-alive
+ * overlay repositioning - e.g. `terminal:<id>` / `browser:<id>`).
+ */
+export function tabRefKey(ref: UnifiedTabRef): string {
 	return `${ref.type}:${ref.id}`;
+}
+
+/**
+ * Split a `tabRefKey`-keyed PaneRects map (as published by TiledLayout) into
+ * per-kind maps keyed by bare tab id, so the terminal and browser keep-alive
+ * overlays can look their tab up directly. Only terminal/browser leaves need
+ * repositioning (AI/file panes render inline), so other kinds are ignored.
+ */
+export function splitPaneRectsByKind(paneRects: PaneRects): {
+	terminals: Map<string, PaneRect>;
+	browsers: Map<string, PaneRect>;
+} {
+	const terminals = new Map<string, PaneRect>();
+	const browsers = new Map<string, PaneRect>();
+	const TERMINAL = 'terminal:';
+	const BROWSER = 'browser:';
+	for (const [key, rect] of paneRects) {
+		if (key.startsWith(TERMINAL)) terminals.set(key.slice(TERMINAL.length), rect);
+		else if (key.startsWith(BROWSER)) browsers.set(key.slice(BROWSER.length), rect);
+	}
+	return { terminals, browsers };
 }
 
 /** Drop every occurrence of `tab` from `order` (matched by type + id). */

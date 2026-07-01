@@ -36,8 +36,11 @@ import {
 	tileTabIntoGroup,
 	createGroupFromDrop,
 	promotePaneToStandalone,
+	tabRefKey,
+	splitPaneRectsByKind,
 	type DropRect,
 } from '../panelLayout';
+import type { PaneRects } from '../../types';
 
 const aiRef = (id: string): UnifiedTabRef => ({ type: 'ai', id });
 const fileRef = (id: string): UnifiedTabRef => ({ type: 'file', id });
@@ -784,5 +787,53 @@ describe('promotePaneToStandalone', () => {
 		const session = sessionWith(group, []);
 		expect(promotePaneToStandalone(session, 'nope', 'l1', 0).tabGroups).toHaveLength(1);
 		expect(promotePaneToStandalone(session, 'grp', 'missing', 0).unifiedTabOrder).toEqual([]);
+	});
+});
+
+describe('tabRefKey', () => {
+	it('builds a stable `type:id` key used for the per-pane geometry map', () => {
+		expect(tabRefKey({ type: 'terminal', id: 't1' })).toBe('terminal:t1');
+		expect(tabRefKey({ type: 'browser', id: 'b9' })).toBe('browser:b9');
+		expect(tabRefKey(aiRef('a'))).toBe('ai:a');
+		expect(tabRefKey(fileRef('f'))).toBe('file:f');
+	});
+
+	it('is unique per (type, id) so terminal and browser leaves never collide', () => {
+		expect(tabRefKey({ type: 'terminal', id: 'x' })).not.toBe(
+			tabRefKey({ type: 'browser', id: 'x' })
+		);
+	});
+});
+
+describe('splitPaneRectsByKind', () => {
+	const rect = (n: number) => ({ top: n, left: n, width: n, height: n });
+
+	it('routes terminal/browser keys into per-kind maps under bare tab ids', () => {
+		const paneRects: PaneRects = new Map([
+			['terminal:t1', rect(1)],
+			['browser:b1', rect(2)],
+			['terminal:t2', rect(3)],
+		]);
+		const { terminals, browsers } = splitPaneRectsByKind(paneRects);
+		expect([...terminals.keys()].sort()).toEqual(['t1', 't2']);
+		expect([...browsers.keys()]).toEqual(['b1']);
+		expect(terminals.get('t1')).toEqual(rect(1));
+		expect(browsers.get('b1')).toEqual(rect(2));
+	});
+
+	it('ignores ai/file keys (those panes render inline, not as overlays)', () => {
+		const paneRects: PaneRects = new Map([
+			['ai:a1', rect(1)],
+			['file:f1', rect(2)],
+		]);
+		const { terminals, browsers } = splitPaneRectsByKind(paneRects);
+		expect(terminals.size).toBe(0);
+		expect(browsers.size).toBe(0);
+	});
+
+	it('returns empty maps for an empty input', () => {
+		const { terminals, browsers } = splitPaneRectsByKind(new Map());
+		expect(terminals.size).toBe(0);
+		expect(browsers.size).toBe(0);
 	});
 });

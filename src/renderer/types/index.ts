@@ -656,6 +656,22 @@ export type PanelLayoutNode =
 	  };
 
 /**
+ * A tiled pane's content-box rectangle relative to the main-panel container,
+ * published by TiledLayout so keep-alive terminal/browser overlays can be
+ * repositioned onto each pane (they live at the panel level and can't render
+ * inline). See MainPanelContent / TiledLayout (Phase 04 tab tiling).
+ */
+export interface PaneRect {
+	top: number;
+	left: number;
+	width: number;
+	height: number;
+}
+
+/** Pane rects keyed by `tabRefKey` (e.g. `terminal:<id>` / `browser:<id>`). */
+export type PaneRects = Map<string, PaneRect>;
+
+/**
  * A tiled group of tabs shown as one entry in the tab strip.
  *
  * `layout` is the recursive split tree whose leaves reference existing tabs

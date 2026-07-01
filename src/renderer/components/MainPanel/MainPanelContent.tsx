@@ -13,7 +13,13 @@ import { WizardConversationView, DocumentGenerationView } from '../InlineWizard'
 import { BrowserTabView, type BrowserTabViewHandle } from './BrowserTabView';
 import { TiledLayout } from './TiledLayout';
 import { PaneDropZones } from './PaneDropZones';
-import { findLeafById } from '../../utils/panelLayout';
+import {
+	findLeafById,
+	findLeafByTabRef,
+	focusPaneInSession,
+	splitPaneRectsByKind,
+} from '../../utils/panelLayout';
+import { updateSessionWith } from '../../stores/sessionStore';
 import { getTabDisplayName } from '../../utils/tabHelpers';
 import { useBrowserTabMounting } from '../../hooks/browser/useBrowserTabMounting';
 import { useUIStore } from '../../stores/uiStore';
@@ -31,6 +37,7 @@ import type {
 	ThinkingItem,
 	QueuedItem,
 	UnifiedTabRef,
+	PaneRects,
 } from '../../types';
 import type { SlashCommand } from './types';
 import type { TabCompletionSuggestion, TabCompletionFilter } from '../../hooks';
@@ -507,6 +514,40 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 			: null;
 	const groupFocusedIsNonAi =
 		!!groupFocusedLeaf && groupFocusedLeaf.kind === 'leaf' && groupFocusedLeaf.tab.type !== 'ai';
+	// The browser tab id of the group's focused pane (if the focused pane is a
+	// browser), so only that tiled webview holds Chromium keyboard input.
+	const groupFocusedBrowserTabId =
+		groupFocusedLeaf && groupFocusedLeaf.kind === 'leaf' && groupFocusedLeaf.tab.type === 'browser'
+			? groupFocusedLeaf.tab.id
+			: null;
+	// Tiling geometry published by TiledLayout: pane content-box rects keyed by
+	// `tabRefKey` (e.g. `terminal:<id>` / `browser:<id>`) relative to this panel.
+	// The keep-alive terminal/browser overlays below reposition onto these rects
+	// so those guests tile without unmount/remount. Empty when no group / no such
+	// leaves; TiledLayout clears it on unmount so no stale geometry lingers.
+	const [paneRects, setPaneRects] = React.useState<PaneRects>(() => new Map());
+	// Split the published rects by kind (bare tab id keys) so each overlay can look
+	// its tab up directly. Recomputed only when the map changes.
+	const { terminals: terminalPaneRects, browsers: browserPaneRects } = React.useMemo(
+		() => splitPaneRectsByKind(paneRects),
+		[paneRects]
+	);
+	// Click-to-focus for tiled terminal/browser panes: their live overlay sits on
+	// top of the transparent PaneFrame slot, so a click lands on the overlay (not
+	// the frame's own onMouseDown). This routes the click back to the owning leaf
+	// so focusedPaneId updates and the focus ring / AI-input suppression follow.
+	const focusTiledPaneByTab = React.useCallback(
+		(ref: UnifiedTabRef) => {
+			if (!activeGroup) return;
+			const leaf = findLeafByTabRef(activeGroup.layout, ref);
+			if (!leaf || leaf.kind !== 'leaf') return;
+			if (activeGroup.focusedPaneId === leaf.id) return;
+			const groupId = activeGroup.id;
+			const leafId = leaf.id;
+			updateSessionWith(activeSession.id, (s) => focusPaneInSession(s, groupId, leafId));
+		},
+		[activeGroup, activeSession.id]
+	);
 	// Number of open modal/overlay layers. When any layer is open over a browser
 	// tab (e.g. the Tab Switcher), the guest <webview> must release Chromium input
 	// focus so keyboard navigation lands in the modal instead of the page. Driving
@@ -556,6 +597,7 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 					session={activeSession}
 					theme={theme}
 					zoomedPaneId={zoomedPaneId}
+					onPaneRectsChange={setPaneRects}
 				/>
 			) : /* Browser tabs render through the persistent keep-alive overlay block below (not
 			    inline) so their <webview> never remounts when switching tabs. Skip rendering
@@ -886,15 +928,28 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 					? activeSession
 					: mountedTerminalSessionsRef.current.get(sessionId);
 				if (!session) return null;
+				// Tiling: this session has terminal tabs that are leaves in the active
+				// group. Each such tab's layer is positioned onto its pane rect (below,
+				// inside TerminalView), so the overlay must be shown even though inputMode
+				// isn't 'terminal'. Only the current session can own the active group.
+				const hasTerminalPanes = isCurrentSession && terminalPaneRects.size > 0;
 				const isTerminalVisible = isCurrentSession && session.inputMode === 'terminal';
+				// Overlay shows for standalone terminal mode OR when tiling terminal panes.
+				// It always spans the full panel (inset-0) so the pane rects - which are
+				// panel-relative - map straight onto the absolutely-positioned tab layers.
+				const overlayShown = isTerminalVisible || hasTerminalPanes;
 				return (
 					<div
 						key={sessionId}
-						className={`absolute inset-0 flex flex-col${isTerminalVisible ? '' : ' terminal-hidden'}`}
+						className={`absolute inset-0 flex flex-col${overlayShown ? '' : ' terminal-hidden'}`}
 						style={{
-							visibility: isTerminalVisible ? 'visible' : 'hidden',
+							visibility: overlayShown ? 'visible' : 'hidden',
+							// Standalone terminal captures input across the whole panel. The tiled
+							// overlay wrapper is click-through (none) so clicks on other panes and
+							// dividers land; its positioned pane layers re-enable pointerEvents:auto
+							// over their own rects (set inside TerminalView).
 							pointerEvents: isTerminalVisible ? 'auto' : 'none',
-							zIndex: isTerminalVisible ? 1 : -1,
+							zIndex: overlayShown ? 1 : -1,
 						}}
 					>
 						<TerminalView
@@ -911,7 +966,15 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 							onTabPidChange={createTabPidChangeHandler(sessionId)}
 							searchOpen={isCurrentSession ? terminalSearchOpen : false}
 							onSearchClose={isCurrentSession ? () => setTerminalSearchOpen(false) : undefined}
-							isVisible={isTerminalVisible}
+							paneRects={hasTerminalPanes ? terminalPaneRects : undefined}
+							onPaneMouseDown={
+								hasTerminalPanes
+									? (tid) => focusTiledPaneByTab({ type: 'terminal', id: tid })
+									: undefined
+							}
+							// Visible in standalone terminal mode OR when tiling terminal panes,
+							// so XTerminal keeps its WebGL renderer alive and repaints on show.
+							isVisible={isTerminalVisible || hasTerminalPanes}
 							onCopySelection={onTerminalCopySelection}
 							onSendSelectionToAgent={onTerminalSendSelectionToAgent}
 						/>
@@ -926,22 +989,49 @@ export const MainPanelContent = React.memo(function MainPanelContent(props: Main
 			{mountedBrowserTabIds.map((tabId) => {
 				const browserTab = activeSession.browserTabs?.find((t) => t.id === tabId);
 				if (!browserTab) return null;
-				const isBrowserVisible =
-					activeSession.inputMode === 'ai' && activeSession.activeBrowserTabId === tabId;
+				// Tiling: this browser tab is a leaf in the active group. Position its
+				// overlay onto the published pane rect (multiple browsers visible at
+				// once); BrowserTabView is untouched so the per-agent <webview> partition
+				// isolation stays intact. Falls back to standalone when no rect.
+				const browserPaneRect = browserPaneRects.get(tabId);
+				const isBrowserTiled = browserPaneRect != null;
+				const isBrowserVisible = isBrowserTiled
+					? true
+					: activeSession.inputMode === 'ai' && activeSession.activeBrowserTabId === tabId;
 				// Hold keyboard focus only when no modal/overlay is layered above the
 				// page. The tab stays visually rendered (visibility/zIndex below are
 				// driven by isBrowserVisible), but the webview yields input focus to an
 				// open layer so its keyboard navigation works (e.g. the Tab Switcher).
-				const isBrowserFocusActive = isBrowserVisible && layerCount === 0;
+				// When tiled, only the group's focused browser pane holds webview input.
+				const isBrowserFocusActive = isBrowserTiled
+					? groupFocusedBrowserTabId === tabId && layerCount === 0
+					: isBrowserVisible && layerCount === 0;
 				return (
 					<div
 						key={tabId}
-						className="absolute inset-0 flex flex-col"
-						style={{
-							visibility: isBrowserVisible ? 'visible' : 'hidden',
-							pointerEvents: isBrowserVisible ? 'auto' : 'none',
-							zIndex: isBrowserVisible ? 2 : -1,
-						}}
+						className={`absolute flex flex-col${isBrowserTiled ? '' : ' inset-0'}`}
+						// Tiling: pressing this browser pane focuses it (its overlay sits over
+						// the transparent PaneFrame slot). Capture phase so focus lands before
+						// the toolbar/webview handles the press.
+						onMouseDownCapture={
+							isBrowserTiled ? () => focusTiledPaneByTab({ type: 'browser', id: tabId }) : undefined
+						}
+						style={
+							isBrowserTiled
+								? {
+										top: browserPaneRect.top,
+										left: browserPaneRect.left,
+										width: browserPaneRect.width,
+										height: browserPaneRect.height,
+										pointerEvents: 'auto',
+										zIndex: 2,
+									}
+								: {
+										visibility: isBrowserVisible ? 'visible' : 'hidden',
+										pointerEvents: isBrowserVisible ? 'auto' : 'none',
+										zIndex: isBrowserVisible ? 2 : -1,
+									}
+						}
 					>
 						<BrowserTabView
 							ref={(handle) => {

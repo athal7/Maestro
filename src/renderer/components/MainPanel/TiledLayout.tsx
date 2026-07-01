@@ -8,11 +8,31 @@ import { getTerminalTabDisplayName } from '../../utils/terminalTabHelpers';
 import {
 	findLeafById,
 	focusPaneInSession,
+	tabRefKey,
 	updateGroupInSession,
 	updateSplitSizes,
 } from '../../utils/panelLayout';
 import { writeTabTilePayload } from '../../utils/tabDragPayload';
-import type { PanelLayoutNode, Session, TabGroup, Theme, UnifiedTabRef } from '../../types';
+import { useThrottledCallback } from '../../hooks/utils/useThrottle';
+import type {
+	PaneRects,
+	PanelLayoutNode,
+	Session,
+	TabGroup,
+	Theme,
+	UnifiedTabRef,
+} from '../../types';
+
+/**
+ * Registry the recursive layout nodes use to report their transparent slot
+ * elements up to the TiledLayout root, which measures them together and
+ * publishes a PaneRects map. Terminal/browser leaves register their content
+ * slot; the root's ResizeObserver + layout effect keep the rects current.
+ */
+interface PaneSlotRegistry {
+	register: (key: string, el: HTMLElement | null) => void;
+}
+const PaneSlotContext = React.createContext<PaneSlotRegistry | null>(null);
 
 // Lazy-loaded to match MainPanelContent: FilePreview pulls the full markdown /
 // syntax-highlighting stack into the bundle, so it stays code-split behind first
@@ -27,8 +47,9 @@ const FilePreview = React.lazy(() =>
  * tabs (see PanelLayoutNode), so this component resolves each ref back to its
  * live tab in the session and reuses the same view components MainPanelContent
  * uses (TerminalOutput for AI, FilePreview for files). Terminal and browser
- * leaves show a placeholder for now - their keep-alive overlay repositioning is
- * deferred to a later phase.
+ * leaves render a transparent slot (title bar + focus ring only): their live
+ * content is the keep-alive overlay MainPanelContent mounts, which this layout
+ * repositions onto each slot's rect via `onPaneRectsChange` (Phase 04).
  *
  * Interactive (Phase 02): sibling panes have draggable dividers (direct-DOM
  * during drag, committed to the group's layout on mouseup, mirroring
@@ -42,6 +63,13 @@ export interface TiledLayoutProps {
 	theme: Theme;
 	/** When set, only this leaf renders (full-panel maximize/zoom). */
 	zoomedPaneId?: string | null;
+	/**
+	 * Called whenever the terminal/browser leaf rectangles change (layout edits,
+	 * container/pane resize, divider drags). MainPanelContent uses the published
+	 * PaneRects to position the keep-alive terminal/browser overlays onto each
+	 * pane instead of filling the whole panel. Empty map when no such leaves.
+	 */
+	onPaneRectsChange?: (rects: PaneRects) => void;
 }
 
 /** Resolve a leaf's display title from the live tab it references. */
@@ -71,8 +99,12 @@ function resolveLeafTitle(tab: UnifiedTabRef, session: Session): string {
 	}
 }
 
-/** Placeholder shown for tab kinds whose tiled rendering lands in a later phase. */
-function PaneComingSoon({ theme, label }: { theme: Theme; label: string }) {
+/**
+ * Fallback shown when a leaf references a tab that no longer exists (e.g. the
+ * underlying AI/file tab was closed while still in the layout). The layout
+ * self-heals on the next edit; this keeps the pane from rendering blank.
+ */
+function PaneMissingTab({ theme }: { theme: Theme }) {
 	return (
 		<div
 			className="flex-1 flex items-center justify-center select-none"
@@ -85,7 +117,7 @@ function PaneComingSoon({ theme, label }: { theme: Theme; label: string }) {
 					border: `1px solid ${theme.colors.border}`,
 				}}
 			>
-				Tiling for {label} tabs arrives in a later phase
+				This tab is no longer available
 			</div>
 		</div>
 	);
@@ -116,7 +148,7 @@ function PaneContent({
 
 	if (tab.type === 'ai') {
 		const aiTab = session.aiTabs?.find((t) => t.id === tab.id);
-		if (!aiTab) return <PaneComingSoon theme={theme} label="this" />;
+		if (!aiTab) return <PaneMissingTab theme={theme} />;
 		// Scope the session to this pane's AI tab so TerminalOutput renders the
 		// correct conversation (it reads logs off the active tab).
 		const paneSession: Session = { ...session, activeTabId: aiTab.id, inputMode: 'ai' };
@@ -149,7 +181,7 @@ function PaneContent({
 
 	if (tab.type === 'file') {
 		const fileTab = session.filePreviewTabs?.find((t) => t.id === tab.id);
-		if (!fileTab) return <PaneComingSoon theme={theme} label="this" />;
+		if (!fileTab) return <PaneMissingTab theme={theme} />;
 		return (
 			<div className="flex-1 overflow-hidden select-text">
 				<React.Suspense fallback={null}>
@@ -167,8 +199,24 @@ function PaneContent({
 		);
 	}
 
-	if (tab.type === 'terminal') return <PaneComingSoon theme={theme} label="terminal" />;
-	return <PaneComingSoon theme={theme} label="browser" />;
+	// Terminal and browser tabs are kept-alive overlays mounted at the panel level
+	// (their PTY scrollback / <webview> DOM must survive tab switches), so a tiled
+	// pane can't host their React tree inline. Instead we render a transparent slot
+	// that reserves the pane's content box and reports its rect up via the registry;
+	// MainPanelContent positions the matching overlay onto that rect.
+	return <PaneOverlaySlot tab={tab} />;
+}
+
+/**
+ * Transparent placeholder for terminal/browser leaves. Reserves the pane's
+ * content box and registers its element so the TiledLayout root can measure it
+ * and publish the rect. The live guest is the keep-alive overlay that sits on
+ * top of this slot (positioned by MainPanelContent).
+ */
+function PaneOverlaySlot({ tab }: { tab: UnifiedTabRef }) {
+	const registry = React.useContext(PaneSlotContext);
+	const key = tabRefKey(tab);
+	return <div className="flex-1 min-w-0 min-h-0" ref={(el) => registry?.register(key, el)} />;
 }
 
 /** A single leaf pane: a title bar (doubles as a drag handle) atop the content. */
@@ -404,24 +452,129 @@ export const TiledLayout = React.memo(function TiledLayout({
 	session,
 	theme,
 	zoomedPaneId,
+	onPaneRectsChange,
 }: TiledLayoutProps) {
 	// Zoom/maximize: render only the focused (zoomed) leaf full-panel. Non-persisted
 	// and controlled by the caller; fall back to the full layout if the id is stale.
 	const zoomedLeaf = zoomedPaneId != null ? findLeafById(group.layout, zoomedPaneId) : null;
 
+	// Root container the pane rects are measured against, and the live registry of
+	// terminal/browser slot elements (populated by PaneOverlaySlot ref callbacks).
+	const containerRef = React.useRef<HTMLDivElement>(null);
+	const slotsRef = React.useRef<Map<string, HTMLElement>>(new Map());
+	// One ResizeObserver watches the container + every registered slot; a resize on
+	// any of them (divider drag, window resize, panel show/hide) re-measures.
+	const observerRef = React.useRef<ResizeObserver | null>(null);
+	// Latest published keys, so we can emit an empty map exactly once when the last
+	// terminal/browser leaf goes away (avoids leaving a stale overlay positioned).
+	const lastKeysRef = React.useRef<string>('');
+
+	// Keep the callback in a ref so the throttled measurer has a stable identity
+	// (the callback prop may change identity every render in the parent).
+	const onChangeRef = React.useRef(onPaneRectsChange);
+	onChangeRef.current = onPaneRectsChange;
+
+	const measure = React.useCallback(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		const base = container.getBoundingClientRect();
+		const rects: PaneRects = new Map();
+		for (const [key, el] of slotsRef.current) {
+			if (!el.isConnected) continue;
+			const r = el.getBoundingClientRect();
+			rects.set(key, {
+				top: r.top - base.top,
+				left: r.left - base.left,
+				width: r.width,
+				height: r.height,
+			});
+		}
+		const keys = [...rects.keys()].sort().join(',');
+		// Skip publishing when nothing is registered and nothing was before, so an
+		// AI/file-only group never churns the parent with empty-map updates.
+		if (rects.size === 0 && lastKeysRef.current === '') return;
+		lastKeysRef.current = keys;
+		onChangeRef.current?.(rects);
+	}, []);
+
+	// Throttle geometry publishes so a divider drag (many resize ticks) doesn't
+	// thrash the parent's state or the overlay repositioning.
+	const throttledMeasure = useThrottledCallback(measure, 16);
+
+	const registry = React.useMemo<PaneSlotRegistry>(
+		() => ({
+			register(key, el) {
+				const observer = observerRef.current;
+				const prev = slotsRef.current.get(key);
+				if (prev && prev !== el && observer) observer.unobserve(prev);
+				if (el) {
+					slotsRef.current.set(key, el);
+					if (observer) observer.observe(el);
+				} else {
+					slotsRef.current.delete(key);
+				}
+				// Slot mount/unmount changes the set of panes, so re-measure now (a
+				// leading throttled call fires immediately) and reflect the new set.
+				throttledMeasure();
+			},
+		}),
+		[throttledMeasure]
+	);
+
+	// Set up the ResizeObserver against the container + already-registered slots,
+	// and re-measure on every layout change (group.layout / zoom identity shift).
+	React.useLayoutEffect(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		const observer = new ResizeObserver(() => throttledMeasure());
+		observerRef.current = observer;
+		observer.observe(container);
+		for (const el of slotsRef.current.values()) observer.observe(el);
+		// Measure once synchronously after layout so overlays land on first paint.
+		measure();
+		return () => {
+			observer.disconnect();
+			observerRef.current = null;
+		};
+	}, [measure, throttledMeasure]);
+
+	// Re-measure whenever the layout tree or zoom target changes (panes added,
+	// removed, resized via keyboard, or maximized) - geometry shifts without a
+	// container resize event in those cases.
+	React.useLayoutEffect(() => {
+		measure();
+	}, [measure, group.layout, zoomedPaneId]);
+
+	// On unmount (group closed / switched away), clear any published rects so the
+	// overlays fall back to standalone positioning with no orphaned geometry.
+	React.useEffect(() => {
+		return () => {
+			if (lastKeysRef.current !== '') {
+				lastKeysRef.current = '';
+				onChangeRef.current?.(new Map());
+			}
+		};
+	}, []);
+
 	return (
-		<div className="flex-1 min-h-0 overflow-hidden flex flex-col" data-tour="tiled-layout">
-			{zoomedLeaf && zoomedLeaf.kind === 'leaf' ? (
-				<PaneFrame
-					node={zoomedLeaf}
-					group={group}
-					session={session}
-					theme={theme}
-					isFocused={true}
-				/>
-			) : (
-				<LayoutNode node={group.layout} group={group} session={session} theme={theme} />
-			)}
-		</div>
+		<PaneSlotContext.Provider value={registry}>
+			<div
+				ref={containerRef}
+				className="flex-1 min-h-0 overflow-hidden flex flex-col"
+				data-tour="tiled-layout"
+			>
+				{zoomedLeaf && zoomedLeaf.kind === 'leaf' ? (
+					<PaneFrame
+						node={zoomedLeaf}
+						group={group}
+						session={session}
+						theme={theme}
+						isFocused={true}
+					/>
+				) : (
+					<LayoutNode node={group.layout} group={group} session={session} theme={theme} />
+				)}
+			</div>
+		</PaneSlotContext.Provider>
 	);
 });
