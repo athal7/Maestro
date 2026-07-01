@@ -73,6 +73,10 @@ export function readTabTilePayload(dataTransfer: DataTransfer): TabTilePayload |
  * every move (the payload data itself is unreadable during `dragover` in some
  * browsers - only the type list is). Also gates out non-Maestro drags.
  */
-export function dragHasTabTilePayload(dataTransfer: DataTransfer): boolean {
-	return Array.from(dataTransfer.types).includes(TAB_TILE_MIME);
+export function dragHasTabTilePayload(dataTransfer: DataTransfer | null | undefined): boolean {
+	// `dataTransfer` (and its `types`) can be absent or non-iterable depending on
+	// the event and environment (jsdom, synthetic drags), so guard before spreading.
+	const types = dataTransfer?.types;
+	if (!types) return false;
+	return Array.from(types).includes(TAB_TILE_MIME);
 }

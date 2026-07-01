@@ -246,6 +246,9 @@ vi.mock('../../../renderer/services/git', () => ({
 vi.mock('../../../renderer/utils/tabHelpers', () => ({
 	getActiveTab: vi.fn((session: Session | null) => session?.aiTabs?.[0] || null),
 	getBusyTabs: vi.fn(() => []),
+	// resolveTabRefTitle (panelLayout) resolves AI-tab titles via this helper when
+	// MainPanelContent computes a single-view / group name; keep the mock complete.
+	getTabDisplayName: vi.fn((tab: { name?: string } | null) => tab?.name || 'AI'),
 }));
 
 // Mock shortcut formatter
